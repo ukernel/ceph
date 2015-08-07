@@ -276,10 +276,13 @@ public:
     completed_requests_dirty = false;
   }
 
+  bool check_access(CInode *in, unsigned mask, int caller_uid, int caller_gid, int setattr_uid, int setattr_gid);
+
 
   Session() : 
     state(STATE_CLOSED), state_seq(0), importing_count(0),
     recalled_at(), recall_count(0), recall_release_count(0),
+    auth_caps(g_ceph_context),
     connection(NULL), item_session_list(this),
     requests(0),  // member_offset passed to front() manually
     cap_push_seq(0),
