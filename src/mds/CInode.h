@@ -993,6 +993,14 @@ public:
 
   Capability *add_client_cap(client_t client, Session *session, SnapRealm *conrealm=0);
   void remove_client_cap(client_t client);
+  void swap_client_cap(Capability *cap, Capability *other_cap);
+  void steal_client_cap(Capability *cap, client_t other) {
+    Capability *other_cap = get_client_cap(other);
+    if (other_cap) {
+      swap_client_cap(cap, other_cap);
+      cap->mark_stolen();
+    }
+  }
   void move_to_realm(SnapRealm *realm);
 
   Capability *reconnect_cap(client_t client, const cap_reconnect_t& icr, Session *session);

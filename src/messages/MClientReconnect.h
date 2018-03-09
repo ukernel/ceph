@@ -22,11 +22,12 @@
 
 class MClientReconnect : public Message {
 
-  const static int HEAD_VERSION = 3;
+  const static int HEAD_VERSION = 4;
 
 public:
   map<inodeno_t, cap_reconnect_t>  caps;   // only head inodes
   vector<ceph_mds_snaprealm_reconnect> realms;
+  std::string reclaiming_uuid;
 
   MClientReconnect() : Message(CEPH_MSG_CLIENT_RECONNECT, HEAD_VERSION) { }
 private:
@@ -57,6 +58,7 @@ public:
     data.clear();
     if (features & CEPH_FEATURE_MDSENC) {
       encode(caps, data);
+      encode(reclaiming_uuid, data);
       header.version = HEAD_VERSION;
     } else if (features & CEPH_FEATURE_FLOCK) {
       // encode with old cap_reconnect_t encoding
@@ -82,6 +84,9 @@ public:
     if (header.version >= 3) {
       // new protocol
       decode(caps, p);
+      if (header.version >= 4)
+	decode(reclaiming_uuid, p);
+
     } else if (header.version == 2) {
       __u32 n;
       decode(n, p);
@@ -102,7 +107,6 @@ public:
       decode(realms.back(), p);
     }
   }
-
 };
 
 

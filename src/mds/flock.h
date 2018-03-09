@@ -81,6 +81,8 @@ public:
   map<client_t, int> client_held_lock_counts;
   map<client_t, int> client_waiting_lock_counts;
 
+  set<client_t> reclaiming_from;
+
   /**
    * Check if a lock is on the waiting_locks list.
    *
@@ -254,11 +256,13 @@ public:
     using ceph::encode;
     encode(held_locks, bl);
     encode(client_held_lock_counts, bl);
+    encode(reclaiming_from, bl);
   }
   void decode(bufferlist::iterator& bl) {
     using ceph::decode;
     decode(held_locks, bl);
     decode(client_held_lock_counts, bl);
+    decode(reclaiming_from, bl);
   }
   bool empty() const {
     return held_locks.empty() && waiting_locks.empty() &&

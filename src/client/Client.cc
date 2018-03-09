@@ -2091,7 +2091,25 @@ void Client::handle_client_session(MClientSession *m)
   case CEPH_SESSION_REJECT:
     rejected_by_mds[session->mds_num] = session->inst;
     _closed_mds_session(session);
+    break;
 
+  case CEPH_SESSION_RECLAIM_REPLY:
+    {
+      auto p = m->client_meta.find("reclaim_epoch");
+      if (p == m->client_meta.end()) {
+	session->reclaim_state = MetaSession::RECLAIM_FAIL;
+      } else {
+	session->reclaim_state = MetaSession::RECLAIM_OK;
+	epoch_t epoch = strtoul(p->second.c_str(), nullptr, 10);
+	if (epoch > reclaim_osd_epoch) {
+	  reclaim_osd_epoch = epoch;
+	}
+	auto q = m->client_meta.find("reclaim_addr");
+	if (q != m->client_meta.end())
+	  reclaim_target_addr.parse(q->second.c_str());
+      }
+      signal_cond_list(waiting_for_reclaim);
+    }
     break;
 
   default:
@@ -2699,6 +2717,12 @@ void Client::send_reconnect(MetaSession *session)
   resend_unsafe_requests(session);
 
   MClientReconnect *m = new MClientReconnect;
+  {
+    // tell mds if I'm reclaiming
+    auto it = metadata.find("reclaiming_uuid");
+    if (it != metadata.end())
+      m->reclaiming_uuid = it->second;
+  }
 
   // i have an open session.
   ceph::unordered_set<inodeno_t> did_snaprealm;
@@ -2751,6 +2775,9 @@ void Client::send_reconnect(MetaSession *session)
   session->con->send_message(m);
 
   mount_cond.Signal();
+
+  if (session->reclaim_state == MetaSession::RECLAIMING)
+    signal_cond_list(waiting_for_reclaim);
 }
 
 
@@ -13859,6 +13886,100 @@ void Client::clear_filer_flags(int flags)
   Mutex::Locker l(client_lock);
   assert(flags == CEPH_OSD_FLAG_LOCALIZE_READS);
   objecter->clear_global_op_flag(flags);
+}
+
+// called before mount
+void Client::set_uuid(const std::string& uuid)
+{
+  Mutex::Locker l(client_lock);
+  assert(initialized);
+  assert(!uuid.empty());
+
+  metadata["uuid"] = uuid;
+}
+
+int Client::start_reclaim(const std::string& uuid)
+{
+  Mutex::Locker l(client_lock);
+  assert(!uuid.empty());
+  if (!mounted)
+    return -ENOTCONN;
+
+  for (unsigned mds = 0; mds < mdsmap->get_num_in_mds(); ) {
+    if (!mdsmap->is_up(mds)) {
+      ldout(cct, 10) << "mds." << mds << " not active, waiting for new mdsmap" << dendl;
+      wait_on_list(waiting_for_mdsmap);
+      continue;
+    }
+
+    MetaSession *session;
+    if (have_open_session(mds)) {
+      session = &mds_sessions.at(mds);
+      if (session->reclaim_state == MetaSession::RECLAIM_NULL ||
+	  session->reclaim_state == MetaSession::RECLAIMING) {
+	MClientSession *m = new MClientSession(CEPH_SESSION_REQUEST_RECLAIM);
+	m->client_meta["uuid"] = uuid;
+	session->con->send_message(m);
+	wait_on_list(waiting_for_reclaim);
+      } else if (session->reclaim_state == MetaSession::RECLAIM_FAIL) {
+	return -ENOTRECOVERABLE;
+      } else {
+	mds++;
+      }
+    } else {
+      session = _get_or_open_mds_session(mds);
+      if (rejected_by_mds.count(mds))
+	return -EPERM;
+      if (session->state == MetaSession::STATE_OPENING) {
+	ldout(cct, 10) << "waiting for session to mds." << mds << " to open" << dendl;
+	wait_on_context_list(session->waiting_for_open);
+	if (rejected_by_mds.count(mds))
+	  return -EPERM;
+      } else {
+	// umounting?
+	return -EINVAL;
+      }
+    }
+  }
+
+  // didn't find target session in any mds
+  if (reclaim_target_addr == entity_addr_t())
+    return -ENOTRECOVERABLE;
+
+  // use blacklist to check if target session was killed
+  // (config option mds_session_blacklist_on_evict needs to be true)
+  C_SaferCond cond;
+  if (!objecter->wait_for_map(reclaim_osd_epoch, &cond)) {
+    ldout(cct, 10) << __func__ << ": waiting for OSD epoch " << reclaim_osd_epoch << dendl;
+    cond.wait();
+  }
+
+  bool blacklisted = objecter->with_osdmap(
+      [this](const OSDMap &osd_map) -> bool {
+	return osd_map.is_blacklisted(reclaim_target_addr);
+      });
+  if (blacklisted)
+    return -ENOTRECOVERABLE;
+
+  metadata["reclaiming_uuid"] = uuid;
+  return 0;
+}
+
+void Client::finish_reclaim()
+{
+  if (!mounted)
+    return;
+
+  for (auto &it : mds_sessions) {
+    flush_mdlog(&it.second);
+    MClientSession *m = new MClientSession(CEPH_SESSION_REQUEST_RECLAIM_DONE);
+    it.second.con->send_message(m);
+  }
+
+  auto it = metadata.find("reclaiming_uuid");
+  assert(it != metadata.end());
+  metadata["uuid"] = it->second;
+  metadata.erase(it);
 }
 
 /**

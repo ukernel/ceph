@@ -50,6 +50,7 @@
 #include "events/EOpen.h"
 #include "events/ECommitted.h"
 
+#include "include/stringify.h"
 #include "include/filepath.h"
 #include "common/errno.h"
 #include "common/Timer.h"
@@ -205,7 +206,7 @@ void Server::dispatch(Message *m)
     MClientRequest *req = static_cast<MClientRequest*>(m);
     if (mds->is_reconnect() || mds->get_want_state() == CEPH_MDS_STATE_RECONNECT) {
       Session *session = mds->get_session(req);
-      if (!session || session->is_closed()) {
+      if (!session || session->is_closed() || session->is_being_reclaimed()) {
 	dout(5) << "session is closed, dropping " << req->get_reqid() << dendl;
 	req->put();
 	return;
@@ -292,6 +293,158 @@ public:
   }
 };
 
+Session* Server::find_session_by_uuid(const std::string& uuid, bool want_reclaimer)
+{
+  Session* session = nullptr;
+  for (auto& it : mds->sessionmap.get_sessions()) {
+    auto& metadata = it.second->info.client_metadata;
+
+    auto p = metadata.find("uuid");
+    if (p == metadata.end() || p->second != uuid)
+      continue;
+
+    if (!want_reclaimer && it.second->info.client_metadata.count("reclaiming_uuid"))
+      continue;
+
+    if (!session) {
+      session = it.second;
+    } else if (!session->reclaiming_from) {
+      assert(it.second->reclaiming_from == session);
+      session = it.second;
+    } else {
+      assert(session->reclaiming_from == it.second);
+    }
+  }
+  return session;
+}
+
+class C_MDS_ReclaimLogged : public ServerLogContext {
+  Session *session;
+  version_t cmapv;
+  MClientSession *reply;
+public:
+  C_MDS_ReclaimLogged(Server *srv, Session *s, version_t pv, MClientSession *r) :
+    ServerLogContext(srv), session(s), cmapv(pv), reply(r) { }
+  void finish(int r) override {
+    assert(r == 0);
+    server->reclaim_session_logged(session, cmapv, reply);
+  }
+};
+
+void Server::reclaim_session_logged(Session *session, version_t pv, MClientSession *reply)
+{
+  mds->sessionmap.mark_dirty(session);
+  if (reply)
+    mds->send_message_client(reply, session);
+}
+
+void Server::reclaim_session(Session *session, MClientSession *m)
+{
+  if (!session->is_open() && !session->is_stale()) {
+    dout(10) << "session not open, dropping this req" << dendl;
+    return;
+  }
+
+  auto it = m->client_meta.find("uuid");
+  if (it == m->client_meta.end()) {
+    dout(3) << __func__ << " invalid message (no uuid)" << dendl;
+    return;
+  }
+  const auto& uuid = it->second;
+
+  int err = 0;
+  Session* target = find_session_by_uuid(uuid, true);
+  if (!target) {
+    // it's possible that client didn't  open session for this mds.
+  } else if (target->reclaiming_from) {
+    Session* reclaimer = target;
+    target = reclaimer->reclaiming_from;
+    if (session != reclaimer) {
+
+      for (Capability *cap : session->caps) {
+	if (!cap->is_stolen())
+	  continue;
+
+	CInode *in = cap->get_inode();
+	Capability *orig_cap = in->get_client_cap(target->get_client());
+	assert(orig_cap);
+	in->swap_client_cap(orig_cap, cap);
+	cap->clear_stolen();
+      }
+
+      reclaimer->reclaiming_from = nullptr;
+      kill_session(reclaimer, nullptr);
+      session->reclaiming_from = target;
+    }
+  } else {
+    // FIXME: when target is stale, should mds return error?
+    if (!target->is_open() && !target->is_stale()) {
+      err = -ENOTRECOVERABLE;
+    } else {
+      mds->sessionmap.mark_reclaiming(session, target);
+      // clean up requests, too
+      elist<MDRequestImpl*>::iterator p =
+	target->requests.begin(member_offset(MDRequestImpl, item_session_request));
+      while (!p.end()) {
+	MDRequestRef mdr = mdcache->request_get((*p)->reqid);
+	++p;
+	mdcache->request_kill(mdr);
+      }
+      mds->locker->remove_stale_leases(target);
+    }
+  }
+
+  MClientSession *reply = new MClientSession(CEPH_SESSION_RECLAIM_REPLY);
+  if (!err) {
+    auto epoch = mds->objecter->with_osdmap([](const OSDMap &o){ return o.get_epoch(); });
+    reply->client_meta["reclaim_epoch"] = stringify(epoch);
+    if (target)
+      reply->client_meta["reclaim_addr"] = stringify(target->info.inst.addr);
+
+    session->info.client_metadata["reclaiming_uuid"] = uuid;
+  }
+
+  // update uuid even reclaim failed
+  session->info.client_metadata["uuid"] = uuid;
+
+  mds->sessionmap.touch_session(session);
+  version_t pv = mds->sessionmap.mark_projected(session);
+  mdlog->start_submit_entry(new ESession(session->info.inst, true, pv,
+					 session->info.client_metadata),
+			    new C_MDS_ReclaimLogged(this, session, pv, reply));
+  mdlog->flush();
+}
+
+void Server::finish_reclaim_session(Session *session)
+{
+  if (!session->info.client_metadata.erase("reclaiming_uuid"))
+    return;
+
+  Session *target = session->reclaiming_from;
+  if (target) {
+    mds->sessionmap.clear_reclaiming(session);
+    kill_session(target, NULL);
+  }
+
+  if (!session->is_open() && !session->is_stale())
+    return;
+
+  for (Capability *cap : session->caps) {
+    if (!cap->is_stolen())
+      continue;
+
+    cap->clear_stolen();
+    CInode *in = cap->get_inode();
+    mds->locker->issue_caps(in, cap);
+  }
+
+  mds->sessionmap.touch_session(session);
+  version_t pv = mds->sessionmap.mark_projected(session);
+  mdlog->start_submit_entry(new ESession(session->info.inst, true, pv,
+			    session->info.client_metadata),
+			    new C_MDS_ReclaimLogged(this, session, pv, NULL));
+}
+
 /* This function DOES put the passed message before returning*/
 void Server::handle_client_session(MClientSession *m)
 {
@@ -329,11 +482,13 @@ void Server::handle_client_session(MClientSession *m)
   uint64_t sseq = 0;
   switch (m->get_op()) {
   case CEPH_SESSION_REQUEST_OPEN:
+  {
     if (session->is_opening() ||
 	session->is_open() ||
 	session->is_stale() ||
-	session->is_killing()) {
-      dout(10) << "currently open|opening|stale|killing, dropping this req" << dendl;
+	session->is_killing() ||
+	session->is_being_reclaimed()) {
+      dout(10) << "currently open|opening|stale|killing|reclaiming, dropping this req" << dendl;
       m->put();
       return;
     }
@@ -365,10 +520,12 @@ void Server::handle_client_session(MClientSession *m)
       dout(20) << "  " << i->first << ": " << i->second << dendl;
     }
 
+    std::map<std::string, std::string>::const_iterator it;
     // Special case for the 'root' metadata path; validate that the claimed
     // root is actually within the caps of the session
-    if (session->info.client_metadata.count("root")) {
-      const auto claimed_root = session->info.client_metadata.at("root");
+    it = session->info.client_metadata.find("root");
+    if (it != session->info.client_metadata.end()) {
+      const auto& claimed_root = it->second;
       // claimed_root has a leading "/" which we strip before passing
       // into caps check
       if (claimed_root.empty() || claimed_root[0] != '/' ||
@@ -385,6 +542,16 @@ void Server::handle_client_session(MClientSession *m)
       }
     }
 
+    it = session->info.client_metadata.find("uuid");
+    if (it != session->info.client_metadata.end()) {
+      if (find_session_by_uuid(it->second, true)) {
+	mds->clog->warn() << "duplicated session uuid ('" << it->second << "')";
+	mds->send_message_client(new MClientSession(CEPH_SESSION_REJECT), session);
+	session->clear();
+	break;
+      }
+    }
+
     if (session->is_closed())
       mds->sessionmap.add_session(session);
 
@@ -395,7 +562,7 @@ void Server::handle_client_session(MClientSession *m)
 			      new C_MDS_session_finish(this, session, sseq, true, pv));
     mdlog->flush();
     break;
-
+  }
   case CEPH_SESSION_REQUEST_RENEWCAPS:
     if (session->is_open() ||
 	session->is_stale()) {
@@ -415,8 +582,9 @@ void Server::handle_client_session(MClientSession *m)
     {
       if (session->is_closed() || 
 	  session->is_closing() ||
-	  session->is_killing()) {
-	dout(10) << "already closed|closing|killing, dropping this req" << dendl;
+	  session->is_killing() ||
+	  session->is_being_reclaimed()) {
+	dout(10) << "already closed|closing|killing|reclaiming, dropping this req" << dendl;
 	m->put();
 	return;
       }
@@ -426,8 +594,7 @@ void Server::handle_client_session(MClientSession *m)
 	return;
       }
       assert(session->is_open() || 
-	     session->is_stale() || 
-	     session->is_opening());
+	     session->is_stale());
       if (m->get_seq() < session->get_push_seq()) {
 	dout(10) << "old push seq " << m->get_seq() << " < " << session->get_push_seq() 
 		 << ", dropping" << dendl;
@@ -456,6 +623,13 @@ void Server::handle_client_session(MClientSession *m)
   case CEPH_SESSION_REQUEST_FLUSH_MDLOG:
     if (mds->is_active())
       mdlog->flush();
+    break;
+
+  case CEPH_SESSION_REQUEST_RECLAIM:
+    reclaim_session(session, m);
+    break;
+  case CEPH_SESSION_REQUEST_RECLAIM_DONE:
+    finish_reclaim_session(session);
     break;
 
   default:
@@ -588,12 +762,12 @@ version_t Server::prepare_force_open_sessions(map<client_t,entity_inst_t>& cm,
   version_t pv = mds->sessionmap.get_projected();
 
   dout(10) << "prepare_force_open_sessions " << pv 
-	   << " on " << cm.size() << " clients"
-	   << dendl;
-  for (map<client_t,entity_inst_t>::iterator p = cm.begin(); p != cm.end(); ++p) {
+	   << " on " << cm.size() << " clients" << dendl;
 
+  for (map<client_t,entity_inst_t>::iterator p = cm.begin(); p != cm.end(); ++p) {
     Session *session = mds->sessionmap.get_or_add_session(p->second);
     pv = mds->sessionmap.mark_projected(session);
+
     if (session->is_closed() || 
 	session->is_closing() ||
 	session->is_killing()) {
@@ -604,8 +778,20 @@ version_t Server::prepare_force_open_sessions(map<client_t,entity_inst_t>& cm,
     } else {
       assert(session->is_open() ||
 	     session->is_opening() ||
-	     session->is_stale());
+	     session->is_stale() ||
+	     session->is_being_reclaimed());
     }
+
+    // have opened new session. check if client is reclaiming it.
+    if (!sseqmap.empty() && !session->reclaiming_from) {
+      auto q =  session->info.client_metadata.find("reclaiming_uuid");
+      if (q != session->info.client_metadata.end()) {
+	Session *from = find_session_by_uuid(q->second, false);
+	if (from)
+	  mds->sessionmap.mark_reclaiming(session, from);
+      }
+    }
+
     session->inc_importing();
   }
   return pv;
@@ -643,7 +829,7 @@ void Server::finish_force_open_sessions(map<client_t,entity_inst_t>& cm,
       }
     } else {
       dout(10) << "force_open_sessions skipping already-open " << session->info.inst << dendl;
-      assert(session->is_open() || session->is_stale());
+      assert(session->is_open() || session->is_stale() || session->is_being_reclaimed());
     }
 
     if (dec_import) {
@@ -679,7 +865,8 @@ void Server::terminate_sessions()
     Session *session = *p;
     if (session->is_closing() ||
 	session->is_killing() ||
-	session->is_closed())
+	session->is_closed() ||
+	session->is_being_reclaimed())
       continue;
     journal_close_session(session, Session::STATE_CLOSING, NULL);
   }
@@ -699,7 +886,9 @@ void Server::find_idle_sessions()
   cutoff -= mds->mdsmap->get_session_timeout();
   while (1) {
     Session *session = mds->sessionmap.get_oldest_session(Session::STATE_OPEN);
-    if (!session) break;
+    if (!session)
+      break;
+
     dout(20) << "laggiest active session is " << session->info.inst << dendl;
     if (session->last_cap_renew >= cutoff) {
       dout(20) << "laggiest active session is " << session->info.inst << " and sufficiently new (" 
@@ -744,8 +933,8 @@ void Server::find_idle_sessions()
 
   for (const auto &session: *stale_sessions) {
     if (session->is_importing()) {
-      dout(10) << "stopping at importing session " << session->info.inst << dendl;
-      break;
+      dout(10) << "continue at importing session " << session->info.inst << dendl;
+      continue;
     }
     assert(session->is_stale());
     if (session->last_cap_renew >= cutoff) {
@@ -794,6 +983,7 @@ void Server::kill_session(Session *session, Context *on_safe)
     assert(session->is_closing() || 
 	   session->is_closed() || 
 	   session->is_killing() ||
+	   session->is_being_reclaimed() ||
 	   session->is_importing());
     if (on_safe) {
       on_safe->complete(0);
@@ -829,6 +1019,7 @@ size_t Server::apply_blacklist(const std::set<entity_addr_t> &blacklist)
 
 void Server::journal_close_session(Session *session, int state, Context *on_safe)
 {
+
   uint64_t sseq = mds->sessionmap.set_state(session, state);
   version_t pv = mds->sessionmap.mark_projected(session);
   version_t piv = 0;
@@ -859,12 +1050,31 @@ void Server::journal_close_session(Session *session, int state, Context *on_safe
   }
 
   finish_flush_session(session, session->get_push_seq());
+
+  if (session->reclaiming_from)
+    finish_reclaim_session(session);
 }
 
 void Server::reconnect_clients(MDSInternalContext *reconnect_done_)
 {
   reconnect_done = reconnect_done_;
-  mds->sessionmap.get_client_set(client_reconnect_gather);
+
+  for (auto& p : mds->sessionmap.get_sessions()) {
+    if (!p.first.is_client())
+      continue;
+
+    if (!p.second->is_being_reclaimed())
+      client_reconnect_gather.insert(p.second->get_client());
+
+    auto it = p.second->info.client_metadata.find("reclaiming_uuid");
+    if (it != p.second->info.client_metadata.end()) {
+      Session *from = find_session_by_uuid(it->second, false);
+      if (from) {
+	mds->sessionmap.mark_reclaiming(p.second, from);
+	client_reconnect_gather.erase(from->get_client());
+      }
+    }
+  }
 
   if (client_reconnect_gather.empty()) {
     dout(7) << "reconnect_clients -- no sessions, doing nothing." << dendl;
@@ -873,7 +1083,6 @@ void Server::reconnect_clients(MDSInternalContext *reconnect_done_)
   }
 
   // clients will get the mdsmap and discover we're reconnecting via the monitor.
-  
   reconnect_start = ceph_clock_now();
   dout(1) << "reconnect_clients -- " << client_reconnect_gather.size() << " sessions" << dendl;
   mds->sessionmap.dump();
@@ -906,7 +1115,7 @@ void Server::handle_client_reconnect(MClientReconnect *m)
        << ") from " << m->get_source_inst()
        << " after " << delay << " (allowed interval " << g_conf->mds_reconnect_timeout << ")";
     deny = true;
-  } else if (session->is_closed()) {
+  } else if (!session->is_open()) {
     dout(1) << " session is closed, ignoring reconnect, sending close" << dendl;
     mds->clog->info() << "denied reconnect attempt (mds is "
 	<< ceph_mds_state_name(mds->get_state())
@@ -986,6 +1195,11 @@ void Server::handle_client_reconnect(MClientReconnect *m)
       p->second.path.clear(); // we don't need path
       mdcache->rejoin_recovered_caps(p->first, from, p->second, MDS_RANK_NONE);
     }
+  }
+
+  if (session->reclaiming_from) {
+    if (m->reclaiming_uuid.empty())
+      finish_reclaim_session(session);
   }
 
   // remove from gather set
@@ -1616,7 +1830,8 @@ void Server::handle_client_request(MClientRequest *req)
       dout(5) << "no session for " << req->get_source() << ", dropping" << dendl;
     } else if (session->is_closed() ||
 	       session->is_closing() ||
-	       session->is_killing()) {
+	       session->is_killing() ||
+	       session->is_being_reclaimed()) {
       dout(5) << "session closed|closing|killing, dropping" << dendl;
       session = NULL;
     }
@@ -4024,6 +4239,22 @@ void Server::handle_client_file_setlock(MDRequestRef& mdr)
 	     << ", dropping request!" << dendl;
     respond_to_request(mdr, -EOPNOTSUPP);
     return;
+  }
+
+  if (mdr->session &&
+      mdr->session->reclaiming_from) {
+    client_t old_client = mdr->session->reclaiming_from->get_client();
+    dout(10) << " reclaiming locks from client." << old_client << dendl;
+    if (!lock_state->reclaiming_from.count(old_client)) {
+      lock_state->remove_all_from(old_client);
+      lock_state->reclaiming_from.insert(old_client);
+    }
+    will_wait = false; // reclaim op should be non-blocking
+  } else if (!lock_state->reclaiming_from.empty()) {
+    dout(10) << " someone else is reclaiming locks, waiting" << dendl;
+    mds->locker->drop_locks(mdr.get());
+    mdr->drop_local_auth_pins();
+    cur->add_waiter(CInode::WAIT_FLOCK, new C_MDS_RetryRequest(mdcache, mdr));
   }
 
   dout(10) << " state prior to lock change: " << *lock_state << dendl;

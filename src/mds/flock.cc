@@ -321,6 +321,10 @@ bool ceph_lock_state_t::remove_all_from (client_t client)
     }
     client_waiting_lock_counts.erase(client);
   }
+
+  if (!reclaiming_from.empty())
+    cleared_any = reclaiming_from.erase(client) && reclaiming_from.empty();
+
   return cleared_any;
 }
 

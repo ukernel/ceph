@@ -2909,6 +2909,20 @@ void CInode::remove_client_cap(client_t client)
   }
 }
 
+void CInode::swap_client_cap(Capability *cap, Capability *other_cap)
+{
+  if (loner_cap == other_cap->get_client()) {
+    if (want_loner_cap == other_cap->get_client())
+      want_loner_cap = cap->get_client();
+    set_loner_cap(cap->get_client());
+  }
+
+  cap->issue_norevoke(other_cap->issued());
+  cap->set_wanted(other_cap->wanted());
+  other_cap->revoke();
+  other_cap->set_wanted(0);
+}
+
 void CInode::move_to_realm(SnapRealm *realm)
 {
   dout(10) << __func__ << " joining realm " << *realm
@@ -3326,8 +3340,11 @@ int CInode::encode_inodestat(bufferlist& bl, Session *session,
     if (!no_caps && !cap) {
       // add a new cap
       cap = add_client_cap(client, session, realm);
-      if (is_auth())
+      if (session->reclaiming_from) {
+	steal_client_cap(cap, session->reclaiming_from->get_client());
+      } else if (is_auth()) {
 	choose_ideal_loner();
+      }
     }
 
     int issue = 0;

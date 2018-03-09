@@ -69,7 +69,8 @@ public:
     STATE_OPEN = 2,
     STATE_CLOSING = 3,   // journaling close
     STATE_STALE = 4,
-    STATE_KILLING = 5
+    STATE_KILLING = 5,
+    STATE_BEING_RECLAIMED = 6
   };
 
   const char *get_state_name(int s) const {
@@ -80,6 +81,7 @@ public:
     case STATE_CLOSING: return "closing";
     case STATE_STALE: return "stale";
     case STATE_KILLING: return "killing";
+    case STATE_BEING_RECLAIMED: return "being_reclaimed";
     default: return "???";
     }
   }
@@ -98,9 +100,9 @@ private:
   // that appropriate mark_dirty calls follow.
   std::deque<version_t> projected;
 
-
-
 public:
+
+  Session *reclaiming_from = nullptr;
 
   void push_pv(version_t pv)
   {
@@ -188,6 +190,7 @@ public:
   bool is_closing() const { return state == STATE_CLOSING; }
   bool is_stale() const { return state == STATE_STALE; }
   bool is_killing() const { return state == STATE_KILLING; }
+  bool is_being_reclaimed() const { return state == STATE_BEING_RECLAIMED; }
 
   void inc_importing() {
     ++importing_count;
@@ -440,6 +443,8 @@ public:
 
 protected:
   version_t projected, committing, committed;
+
+  int num_reclaiming = 0;
 public:
   map<int,xlist<Session*>* > by_state;
   uint64_t set_state(Session *session, int state);
@@ -594,6 +599,20 @@ public:
 
   void wipe();
   void wipe_ino_prealloc();
+
+  void mark_reclaiming(Session *s, Session *t) {
+    s->reclaiming_from = t;
+    set_state(t, Session::STATE_BEING_RECLAIMED);
+    num_reclaiming++;
+  }
+  void clear_reclaiming(Session *s) {
+    Session *t = s->reclaiming_from;
+    s->reclaiming_from = nullptr;
+    assert(t->is_being_reclaimed());
+    set_state(t, Session::STATE_STALE);
+    num_reclaiming--;
+  }
+  int get_num_reclaiming() const { return num_reclaiming; }
 
   // -- loading, saving --
   inodeno_t ino;

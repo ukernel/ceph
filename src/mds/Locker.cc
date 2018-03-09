@@ -2020,6 +2020,12 @@ bool Locker::issue_caps(CInode *in, Capability *only_cap)
 	  session->connection->has_feature(CEPH_FEATURE_MDS_INLINE_DATA)))
       allowed &= ~(CEPH_CAP_FILE_RD | CEPH_CAP_FILE_WR);
 
+    // Server::finish_reclaim_session() will issue/reovke caps if nessesary
+    if (cap->is_stolen() || session->is_being_reclaimed()) {
+      dout(20) << "  reclaiming or being reclaimed, skipping client." << it->first << dendl;
+      continue;
+    }
+
     int pending = cap->pending();
     int wanted = cap->wanted();
 
@@ -2200,7 +2206,6 @@ void Locker::remove_stale_leases(Session *session)
     parent->remove_client_lease(l, this);
   }
 }
-
 
 class C_MDL_RequestInodeFileCaps : public LockerContext {
   CInode *in;
@@ -2670,7 +2675,8 @@ void Locker::handle_client_caps(MClientCaps *m)
     }
     if (session->is_closed() ||
 	session->is_closing() ||
-	session->is_killing()) {
+	session->is_killing() ||
+	session->is_being_reclaimed()) {
       dout(7) << " session closed|closing|killing, dropping " << *m << dendl;
       m->put();
       return;

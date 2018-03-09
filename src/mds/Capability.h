@@ -71,18 +71,20 @@ public:
   MEMPOOL_CLASS_HELPERS();
 
   struct Export {
-    int64_t cap_id;
-    int32_t wanted;
-    int32_t issued;
-    int32_t pending;
+    int64_t cap_id = 0;
+    int32_t wanted = 0;
+    int32_t issued = 0;
+    int32_t pending = 0;
     snapid_t client_follows;
-    ceph_seq_t seq;
-    ceph_seq_t mseq;
+    ceph_seq_t seq = 0;
+    ceph_seq_t mseq = 0;
     utime_t last_issue_stamp;
-    Export() : cap_id(0), wanted(0), issued(0), pending(0), seq(0), mseq(0) {}
-    Export(int64_t id, int w, int i, int p, snapid_t cf, ceph_seq_t s, ceph_seq_t m, utime_t lis) :
+    uint32_t state = 0;
+    Export() {}
+    Export(int64_t id, int w, int i, int p, snapid_t cf, ceph_seq_t s, ceph_seq_t m,
+	   utime_t lis, unsigned st) :
       cap_id(id), wanted(w), issued(i), pending(p), client_follows(cf),
-      seq(s), mseq(m), last_issue_stamp(lis) {}
+      seq(s), mseq(m), last_issue_stamp(lis), state(st) {}
     void encode(bufferlist &bl) const;
     void decode(bufferlist::iterator &p);
     void dump(Formatter *f) const;
@@ -114,6 +116,7 @@ public:
   const static unsigned STATE_NEW		= (1<<1);
   const static unsigned STATE_IMPORTING		= (1<<2);
   const static unsigned STATE_NEEDSNAPFLUSH	= (1<<3);
+  const static unsigned STATE_STOLEN		= (1<<4);
 
 
   Capability(CInode *i = NULL, uint64_t id = 0, client_t c = 0) :
@@ -251,6 +254,9 @@ public:
   bool need_snapflush() { return state & STATE_NEEDSNAPFLUSH; }
   void mark_needsnapflush() { state |= STATE_NEEDSNAPFLUSH; }
   void clear_needsnapflush() { state &= ~STATE_NEEDSNAPFLUSH; }
+  bool is_stolen() { return state & STATE_STOLEN; }
+  void mark_stolen() { state |= STATE_STOLEN; }
+  void clear_stolen() { state &= ~STATE_STOLEN; }
 
   CInode *get_inode() { return inode; }
   client_t get_client() const { return client; }
@@ -273,7 +279,7 @@ public:
   
   // -- exports --
   Export make_export() {
-    return Export(cap_id, _wanted, issued(), pending(), client_follows, last_sent, mseq+1, last_issue_stamp);
+    return Export(cap_id, _wanted, issued(), pending(), client_follows, last_sent, mseq+1, last_issue_stamp, state);
   }
   void merge(Export& other, bool auth_cap) {
     if (!is_stale()) {
@@ -294,6 +300,8 @@ public:
     _wanted = _wanted | other.wanted;
     if (auth_cap)
       mseq = other.mseq;
+    if (other.state & STATE_STOLEN)
+      mark_stolen();
   }
   void merge(int otherwanted, int otherissued) {
     if (!is_stale()) {

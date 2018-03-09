@@ -23,7 +23,7 @@
 
 void Capability::Export::encode(bufferlist &bl) const
 {
-  ENCODE_START(2, 2, bl);
+  ENCODE_START(3, 2, bl);
   encode(cap_id, bl);
   encode(wanted, bl);
   encode(issued, bl);
@@ -32,12 +32,13 @@ void Capability::Export::encode(bufferlist &bl) const
   encode(seq, bl);
   encode(mseq, bl);
   encode(last_issue_stamp, bl);
+  encode(state, bl);
   ENCODE_FINISH(bl);
 }
 
 void Capability::Export::decode(bufferlist::iterator &p)
 {
-  DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, p);
+  DECODE_START_LEGACY_COMPAT_LEN(3, 2, 2, p);
   decode(cap_id, p);
   decode(wanted, p);
   decode(issued, p);
@@ -46,6 +47,8 @@ void Capability::Export::decode(bufferlist::iterator &p)
   decode(seq, p);
   decode(mseq, p);
   decode(last_issue_stamp, p);
+  if (struct_v >= 3)
+    decode(state, p);
   DECODE_FINISH(p);
 }
 
