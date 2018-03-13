@@ -3972,9 +3972,12 @@ void MDCache::rejoin_send_rejoins()
     for (map<client_t, set<mds_rank_t> >::iterator p = client_exports.begin();
 	 p != client_exports.end();
 	 ++p) {
-      entity_inst_t inst = mds->sessionmap.get_inst(entity_name_t::CLIENT(p->first.v));
-      for (set<mds_rank_t>::iterator q = p->second.begin(); q != p->second.end(); ++q)
-	rejoins[*q]->client_map[p->first] = inst;
+      Session *session = mds->sessionmap.get_session(entity_name_t::CLIENT(p->first.v));
+      for (set<mds_rank_t>::iterator q = p->second.begin(); q != p->second.end(); ++q) {
+	auto rejoin =  rejoins[*q];
+	rejoin->client_map[p->first] = session->info.inst;
+	rejoin->client_metamap[p->first] = session->info.client_metadata;
+      }
     }
   }
   
@@ -4344,7 +4347,8 @@ void MDCache::handle_cache_rejoin_weak(MMDSCacheRejoin *weak)
     assert(gather_locks.empty());
 
     // check cap exports.
-    rejoin_client_map.insert(weak->client_map.begin(), weak->client_map.end());
+    rejoin_client_map.merge(weak->client_map);
+    rejoin_client_metamap.merge(weak->client_metamap);
 
     for (auto p = weak->cap_exports.begin(); p != weak->cap_exports.end(); ++p) {
       CInode *in = get_inode(p->first);
@@ -5323,8 +5327,10 @@ bool MDCache::process_imported_caps()
 	 ++p) {
       if (!mds->sessionmap.have_session(entity_name_t::CLIENT(p->first.v))) {
 	C_MDC_RejoinSessionsOpened *finish = new C_MDC_RejoinSessionsOpened(this, rejoin_client_map);
-	version_t pv = mds->server->prepare_force_open_sessions(rejoin_client_map, finish->sseqmap);
-	ESessions *le = new ESessions(pv, rejoin_client_map);
+	version_t pv = mds->server->prepare_force_open_sessions(rejoin_client_map,
+								rejoin_client_metamap,
+								finish->sseqmap);
+	ESessions *le = new ESessions(pv, rejoin_client_map, rejoin_client_metamap);
 	mds->mdlog->start_submit_entry(le, finish);
 	mds->mdlog->flush();
 	rejoin_client_map.clear();
@@ -5332,6 +5338,7 @@ bool MDCache::process_imported_caps()
       }
     }
     rejoin_client_map.clear();
+    rejoin_client_metamap.clear();
 
     // process caps that were exported by slave rename
     for (map<inodeno_t,pair<mds_rank_t,map<client_t,Capability::Export> > >::iterator p = rejoin_slave_exports.begin();

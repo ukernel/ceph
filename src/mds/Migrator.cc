@@ -1411,12 +1411,14 @@ void Migrator::export_go_synced(CDir *dir, uint64_t tid)
   // fill export message with cache data
   MExportDir *req = new MExportDir(dir->dirfrag(), it->second.tid);
   map<client_t,entity_inst_t> exported_client_map;
+  map<client_t, map<string, string> > exported_client_metamap;
   uint64_t num_exported_inodes = encode_export_dir(req->export_data,
 					      dir,   // recur start point
 					      exported_client_map,
+					      exported_client_metamap,
 					      now);
-  encode(exported_client_map, req->client_map,
-           mds->mdsmap->get_up_features());
+  encode(exported_client_map, req->client_map, mds->mdsmap->get_up_features());
+  encode(exported_client_metamap, req->client_map);
 
   // add bounds to message
   set<CDir*> bounds;
@@ -1449,7 +1451,8 @@ void Migrator::export_go_synced(CDir *dir, uint64_t tid)
  * is pretty arbitrary and dumb.
  */
 void Migrator::encode_export_inode(CInode *in, bufferlist& enc_state, 
-				   map<client_t,entity_inst_t>& exported_client_map)
+				   map<client_t, entity_inst_t>& exported_client_map,
+				   map<client_t, map<string, string> >& exported_client_metamap)
 {
   dout(7) << "encode_export_inode " << *in << dendl;
   assert(!in->is_replica(mds->get_nodeid()));
@@ -1465,11 +1468,12 @@ void Migrator::encode_export_inode(CInode *in, bufferlist& enc_state,
   in->encode_export(enc_state);
 
   // caps 
-  encode_export_inode_caps(in, true, enc_state, exported_client_map);
+  encode_export_inode_caps(in, true, enc_state, exported_client_map, exported_client_metamap);
 }
 
 void Migrator::encode_export_inode_caps(CInode *in, bool auth_cap, bufferlist& bl,
-					map<client_t,entity_inst_t>& exported_client_map)
+					map<client_t, entity_inst_t>& exported_client_map,
+					map<client_t, map<string, string> >& exported_client_metamap)
 {
   dout(20) << "encode_export_inode_caps " << *in << dendl;
 
@@ -1487,8 +1491,13 @@ void Migrator::encode_export_inode_caps(CInode *in, bool auth_cap, bufferlist& b
   // make note of clients named by exported capabilities
   for (map<client_t, Capability*>::iterator it = in->client_caps.begin();
        it != in->client_caps.end();
-       ++it) 
-    exported_client_map[it->first] = mds->sessionmap.get_inst(entity_name_t::CLIENT(it->first.v));
+       ++it) {
+    if (exported_client_map.count(it->first))
+      continue;
+    Session *session =  mds->sessionmap.get_session(entity_name_t::CLIENT(it->first.v));
+    exported_client_map[it->first] = session->info.inst;
+    exported_client_metamap[it->first] = session->info.client_metadata;
+  }
 }
 
 void Migrator::finish_export_inode_caps(CInode *in, mds_rank_t peer,
@@ -1570,6 +1579,7 @@ void Migrator::finish_export_inode(CInode *in, utime_t now, mds_rank_t peer,
 uint64_t Migrator::encode_export_dir(bufferlist& exportbl,
 				CDir *dir,
 				map<client_t,entity_inst_t>& exported_client_map,
+				map<client_t, map<string, string> >& exported_client_metamap,
 				utime_t now)
 {
   uint64_t num_exported = 0;
@@ -1635,7 +1645,7 @@ uint64_t Migrator::encode_export_dir(bufferlist& exportbl,
     // -- inode
     exportbl.append("I", 1);    // inode dentry
     
-    encode_export_inode(in, exportbl, exported_client_map);  // encode, and (update state for) export
+    encode_export_inode(in, exportbl, exported_client_map, exported_client_metamap);  // encode, and (update state for) export
     
     // directory?
     list<CDir*> dfs;
@@ -1652,7 +1662,7 @@ uint64_t Migrator::encode_export_dir(bufferlist& exportbl,
 
   // subdirs
   for (auto &dir : subdirs)
-    num_exported += encode_export_dir(exportbl, dir, exported_client_map, now);
+    num_exported += encode_export_dir(exportbl, dir, exported_client_map, exported_client_metamap, now);
 
   return num_exported;
 }
@@ -2493,8 +2503,11 @@ void Migrator::handle_export_dir(MExportDir *m)
   // include imported sessions in EImportStart
   bufferlist::iterator cmp = m->client_map.begin();
   decode(onlogged->imported_client_map, cmp);
+  map<client_t, map<string, string> > client_metamap;
+  decode(client_metamap, cmp);
   assert(cmp.end());
-  le->cmapv = mds->server->prepare_force_open_sessions(onlogged->imported_client_map, onlogged->sseqmap);
+  le->cmapv = mds->server->prepare_force_open_sessions(onlogged->imported_client_map, client_metamap,
+						       onlogged->sseqmap);
   le->client_map.claim(m->client_map);
 
   bufferlist::iterator blp = m->export_data.begin();
@@ -3277,7 +3290,7 @@ void Migrator::export_caps(CInode *in)
   MExportCaps *ex = new MExportCaps;
   ex->ino = in->ino();
 
-  encode_export_inode_caps(in, false, ex->cap_bl, ex->client_map);
+  encode_export_inode_caps(in, false, ex->cap_bl, ex->client_map, ex->client_metamap);
 
   mds->send_message_mds(ex, dest);
 }
@@ -3340,9 +3353,10 @@ void Migrator::handle_export_caps(MExportCaps *ex)
   assert(!finish->peer_exports.empty());   // thus, inode is pinned.
 
   // journal open client sessions
-  version_t pv = mds->server->prepare_force_open_sessions(finish->client_map, finish->sseqmap);
+  map<client_t, map<string, string> > client_metamap = ex->client_metamap;
+  version_t pv = mds->server->prepare_force_open_sessions(ex->client_map, client_metamap, finish->sseqmap);
   
-  ESessions *le = new ESessions(pv, ex->client_map);
+  ESessions *le = new ESessions(pv, ex->client_map, ex->client_metamap);
   mds->mdlog->start_submit_entry(le, finish);
   mds->mdlog->flush();
 

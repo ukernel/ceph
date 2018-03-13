@@ -26,14 +26,17 @@ protected:
 
 public:
   map<client_t,entity_inst_t> client_map;
+  map<client_t, map<string,string> > client_metamap;
   bool old_style_encode;
 
   ESessions() : LogEvent(EVENT_SESSIONS), cmapv(0), old_style_encode(false) { }
-  ESessions(version_t pv, map<client_t,entity_inst_t>& cm) :
+  ESessions(version_t pv, map<client_t,entity_inst_t>& cm,
+	    map<client_t, map<string,string> >& cmm) :
     LogEvent(EVENT_SESSIONS),
     cmapv(pv),
     old_style_encode(false) {
     client_map.swap(cm);
+    client_metamap.swap(cmm);
   }
 
   void mark_old_encoding() { old_style_encode = true; }
