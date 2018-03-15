@@ -494,6 +494,8 @@ protected:
   void put_inode(Inode *in, int n=1);
   void close_dir(Dir *dir);
 
+  int subscribe_mdsmap();
+
   // same as unmount() but for when the client_lock is already held
   void _unmount();
 

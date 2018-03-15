@@ -129,10 +129,12 @@ public:
   size_t apply_blacklist(const std::set<entity_addr_t> &blacklist);
   void journal_close_session(Session *session, int state, Context *on_safe);
 
+  set<client_t> client_reclaim_gather;  // clients that need to be reclaimed
   Session *find_session_by_uuid(const std::string& uuid, bool want_reclaimer);
   void reclaim_session(Session *session, MClientSession *m);
   void finish_reclaim_session(Session *session, MClientSession *reply=nullptr);
   void reclaim_session_logged(Session *session, version_t pv, MClientSession *reply);
+  int get_num_pending_reclaim() const;
 
   void reconnect_clients(MDSInternalContext *reconnect_done_);
   void handle_client_reconnect(class MClientReconnect *m);

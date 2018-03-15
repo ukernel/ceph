@@ -387,6 +387,7 @@ void Server::reclaim_session(Session *session, MClientSession *m)
       err = -ENOTRECOVERABLE;
     } else {
       mds->sessionmap.mark_reclaiming(session, target);
+      client_reclaim_gather.erase(target->get_client());
       // clean up requests, too
       elist<MDRequestImpl*>::iterator p =
 	target->requests.begin(member_offset(MDRequestImpl, item_session_request));
@@ -436,6 +437,8 @@ void Server::finish_reclaim_session(Session *session, MClientSession *reply)
   if (target) {
     mds->sessionmap.clear_reclaiming(session);
     kill_session(target, NULL);
+    if (mds->is_clientreplay() && !get_num_pending_reclaim())
+      mds->maybe_clientreplay_done();
   }
 
   if (!session->is_open() && !session->is_stale()) {
@@ -458,6 +461,11 @@ void Server::finish_reclaim_session(Session *session, MClientSession *reply)
 			    session->info.client_metadata),
 			    new C_MDS_ReclaimLogged(this, session, pv, reply));
   mdlog->flush();
+}
+
+int Server::get_num_pending_reclaim() const
+{
+  return client_reclaim_gather.size() + mds->sessionmap.get_num_reclaiming();
 }
 
 /* This function DOES put the passed message before returning*/
@@ -937,6 +945,7 @@ void Server::find_idle_sessions()
 
 	// do not go through stale, evict it directly.
 	to_evict.push_back(session);
+	client_reclaim_gather.erase(session->get_client());
 	continue;
       }
 
@@ -1003,6 +1012,9 @@ void Server::find_idle_sessions()
       kill_session(session, NULL);
     }
   }
+
+  if (mds->is_clientreplay() && !get_num_pending_reclaim())
+    mds->maybe_clientreplay_done();
 }
 
 /*
@@ -1283,6 +1295,16 @@ void Server::reconnect_tick()
 	 ++p) {
       Session *session = mds->sessionmap.get_session(entity_name_t::CLIENT(p->v));
       assert(session);
+
+      // Keep sessions that have specified timeout. These sessions will prevent
+      // mds from going to active. MDS goes to active after they all have been
+      // killed or reclaimed.
+      if (session->info.client_metadata.count("timeout")) {
+	session->last_cap_renew = reconnect_start;
+	client_reclaim_gather.insert(session->get_client());
+	continue;
+      }
+
       dout(1) << "reconnect gave up on " << session->info.inst << dendl;
 
       mds->clog->warn() << "evicting unresponsive client " << *session
