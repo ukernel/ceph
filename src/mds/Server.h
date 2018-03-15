@@ -131,7 +131,7 @@ public:
 
   Session *find_session_by_uuid(const std::string& uuid, bool want_reclaimer);
   void reclaim_session(Session *session, MClientSession *m);
-  void finish_reclaim_session(Session *session);
+  void finish_reclaim_session(Session *session, MClientSession *reply=nullptr);
   void reclaim_session_logged(Session *session, version_t pv, MClientSession *reply);
 
   void reconnect_clients(MDSInternalContext *reconnect_done_);

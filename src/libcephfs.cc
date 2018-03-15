@@ -1774,9 +1774,10 @@ extern "C" void ceph_set_uuid(class ceph_mount_info *cmount, const char *uuid)
   cmount->get_client()->set_uuid(std::string(uuid));
 }
 
-extern "C" int ceph_start_reclaim(class ceph_mount_info *cmount, const char *uuid)
+extern "C" int ceph_start_reclaim(class ceph_mount_info *cmount,
+				  const char *uuid, unsigned flags)
 {
-  return cmount->get_client()->start_reclaim(std::string(uuid));
+  return cmount->get_client()->start_reclaim(std::string(uuid), flags);
 }
 
 extern "C" void ceph_finish_reclaim(class ceph_mount_info *cmount)

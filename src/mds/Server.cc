@@ -352,6 +352,11 @@ void Server::reclaim_session(Session *session, MClientSession *m)
   }
   const auto& uuid = it->second;
 
+  unsigned flags = 0;
+  it = m->client_meta.find("flags");
+  if (it != m->client_meta.end())
+    flags = strtoul(it->second.c_str(), nullptr, 0);
+
   int err = 0;
   Session* target = find_session_by_uuid(uuid, true);
   if (!target) {
@@ -407,6 +412,11 @@ void Server::reclaim_session(Session *session, MClientSession *m)
   // update uuid even reclaim failed
   session->info.client_metadata["uuid"] = uuid;
 
+  if (flags & CEPH_RECLAIM_RESET) {
+    finish_reclaim_session(session, reply);
+    return;
+  }
+
   mds->sessionmap.touch_session(session);
   version_t pv = mds->sessionmap.mark_projected(session);
   mdlog->start_submit_entry(new ESession(session->info.inst, true, pv,
@@ -415,10 +425,12 @@ void Server::reclaim_session(Session *session, MClientSession *m)
   mdlog->flush();
 }
 
-void Server::finish_reclaim_session(Session *session)
+void Server::finish_reclaim_session(Session *session, MClientSession *reply)
 {
-  if (!session->info.client_metadata.erase("reclaiming_uuid"))
+  if (!session->info.client_metadata.erase("reclaiming_uuid")) {
+    assert(!reply);
     return;
+  }
 
   Session *target = session->reclaiming_from;
   if (target) {
@@ -426,8 +438,10 @@ void Server::finish_reclaim_session(Session *session)
     kill_session(target, NULL);
   }
 
-  if (!session->is_open() && !session->is_stale())
+  if (!session->is_open() && !session->is_stale()) {
+    assert(!reply);
     return;
+  }
 
   for (Capability *cap : session->caps) {
     if (!cap->is_stolen())
@@ -442,7 +456,8 @@ void Server::finish_reclaim_session(Session *session)
   version_t pv = mds->sessionmap.mark_projected(session);
   mdlog->start_submit_entry(new ESession(session->info.inst, true, pv,
 			    session->info.client_metadata),
-			    new C_MDS_ReclaimLogged(this, session, pv, NULL));
+			    new C_MDS_ReclaimLogged(this, session, pv, reply));
+  mdlog->flush();
 }
 
 /* This function DOES put the passed message before returning*/

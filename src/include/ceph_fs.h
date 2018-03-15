@@ -312,6 +312,9 @@ enum {
         CEPH_SESSION_REQUEST_RECLAIM_DONE,
 };
 
+// flags for state reclaim
+#define CEPH_RECLAIM_RESET	1
+
 extern const char *ceph_session_op_name(int op);
 
 struct ceph_mds_session_head {

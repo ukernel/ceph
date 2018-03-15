@@ -1652,8 +1652,13 @@ int ceph_set_deleg_timeout(struct ceph_mount_info *cmount, uint32_t timeout);
 int ceph_ll_delegation(struct ceph_mount_info *cmount, Fh *fh,
 		       unsigned int cmd, ceph_deleg_cb_t cb, void *priv);
 
+/* state reclaim */
+
+#define CEPH_RECLAIM_RESET 	1
+
 void ceph_set_uuid(struct ceph_mount_info *cmount, const char *uuid);
-int ceph_start_reclaim(struct ceph_mount_info *cmount, const char *uuid);
+int ceph_start_reclaim(struct ceph_mount_info *cmount,
+		       const char *uuid, unsigned flags);
 void ceph_finish_reclaim(struct ceph_mount_info *cmount);
 
 #ifdef __cplusplus
