@@ -1656,6 +1656,7 @@ int ceph_ll_delegation(struct ceph_mount_info *cmount, Fh *fh,
 
 #define CEPH_RECLAIM_RESET 	1
 
+void ceph_set_timeout(struct ceph_mount_info *cmount, unsigned timeout);
 void ceph_set_uuid(struct ceph_mount_info *cmount, const char *uuid);
 int ceph_start_reclaim(struct ceph_mount_info *cmount,
 		       const char *uuid, unsigned flags);

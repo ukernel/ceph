@@ -603,6 +603,7 @@ protected:
 
  public:
   void set_uuid(const std::string& uuid);
+  void set_timeout(unsigned timeout);
   int start_reclaim(const std::string& uuid, unsigned flags);
   void finish_reclaim();
 

@@ -13898,6 +13898,15 @@ void Client::set_uuid(const std::string& uuid)
   metadata["uuid"] = uuid;
 }
 
+// called before mount. 0 means infinite
+void Client::set_timeout(unsigned timeout)
+{
+  Mutex::Locker l(client_lock);
+  assert(initialized);
+
+  metadata["timeout"] = stringify(timeout);
+}
+
 int Client::start_reclaim(const std::string& uuid, unsigned flags)
 {
   Mutex::Locker l(client_lock);
