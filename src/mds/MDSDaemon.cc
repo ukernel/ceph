@@ -1141,7 +1141,16 @@ void MDSDaemon::respawn()
   ceph_abort();
 }
 
+bool MDSDaemon::ms_can_fast_dispatch2(const Message::const_ref &m) const
+{
+  return mds_rank ? mds_rank->ms_can_fast_dispatch(m) : false;
+}
 
+void MDSDaemon::ms_fast_dispatch2(const Message::ref &m)
+{
+  if (mds_rank)
+    mds_rank->ms_fast_dispatch(m);
+}
 
 bool MDSDaemon::ms_dispatch2(const Message::ref &m)
 {
@@ -1156,18 +1165,7 @@ bool MDSDaemon::ms_dispatch2(const Message::ref &m)
     return true;
   }
 
-  // First see if it's a daemon message
-  const bool handled_core = handle_core_message(m);
-  if (handled_core) {
-    return true;
-  }
-
-  // Not core, try it as a rank message
-  if (mds_rank) {
-    return mds_rank->ms_dispatch(m);
-  } else {
-    return false;
-  }
+  return handle_core_message(m);
 }
 
 bool MDSDaemon::ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer, bool force_new)

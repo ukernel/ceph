@@ -257,13 +257,9 @@ class MDSRank {
     list<Message::const_ref> waiting_for_nolaggy;
     MDSInternalContextBase::que finished_queue;
     // Dispatch, retry, queues
-    int dispatch_depth;
-    void inc_dispatch_depth() { ++dispatch_depth; }
-    void dec_dispatch_depth() { --dispatch_depth; }
-    void retry_dispatch(const Message::const_ref &m);
     bool handle_deferrable_message(const Message::const_ref &m);
     void _advance_queues();
-    bool _dispatch(const Message::const_ref &m, bool new_msg);
+    bool _dispatch(const Message::const_ref &m);
 
     ceph::heartbeat_handle_d *hb;  // Heartbeat for threads using mds_lock
 
@@ -488,9 +484,6 @@ class MDSRank {
     Context *respawn_hook;
     Context *suicide_hook;
 
-    // Friended to access retry_dispatch
-    friend class C_MDS_RetryMessage;
-
     // FIXME the state machine logic should be separable from the dispatch
     // logic that calls it.
     // >>>
@@ -560,6 +553,7 @@ class MDSRank {
       MDSRank *mds;
 
       uint64_t op_seq = 0;
+      uint64_t op_current_seq;
       std::deque<OpQueueItem> op_queue;
       std::deque<OpQueueItem> op_front_queue;
       std::deque<OpQueueItem> op_ordered_queue;
@@ -576,6 +570,7 @@ class MDSRank {
 	shard_id(id), cct(c), mds(m) {}
     };
     std::vector<MDSShard> shards;
+    static thread_local MDSShard *tls_shard;
 
     ShardedThreadPool op_tp;
 
@@ -594,6 +589,39 @@ class MDSRank {
       MDSRank *mds;
     } op_shardedwq;
 
+    class OpQueueableMessage : public OpQueueableType<OpQueueableMessage> {
+      Message::const_ref msg;
+      uint64_t seq = 0;
+    public:
+      OpQueueableMessage(const Message::const_ref& m) :
+	msg(m), seq(0) {}
+      OpQueueableMessage(Message::const_ref&& m, uint64_t s) :
+	msg(std::move(m)), seq(s) {}
+      OpQueueableMessage(OpQueueableMessage&&) = default;
+      uint64_t get_seq() const override { return seq; }
+      void set_seq(uint64_t s) override { seq = s; }
+      uint32_t get_queue_token() const override {
+	auto name = msg->get_source();;
+	std::hash<uint32_t> H;
+	return (H(name.num()) ^ H(name.type()));
+      }
+      void run(MDSRank *mds) override {
+	Mutex::Locker l(mds->mds_lock);
+	mds->_dispatch(msg);
+      }
+    };
+
+public:
+    uint64_t get_current_op_seq() const {
+      return tls_shard ? tls_shard->op_current_seq : 0;
+    }
+    void queue_message(const Message::const_ref& m) {
+      op_shardedwq.queue(OpQueueableMessage(m));
+    }
+    void queue_message_front(Message::const_ref&& m, uint64_t seq) {
+      op_shardedwq.queue_front(OpQueueableMessage(std::move(m), seq));
+    }
+
 private:
     mono_time starttime = mono_clock::zero();
 };
@@ -603,12 +631,13 @@ private:
  * will put the Message exactly once.*/
 class C_MDS_RetryMessage : public MDSInternalContext {
 protected:
-  Message::const_ref m;
+  Message::const_ref msg;
+  uint64_t op_seq;
 public:
   C_MDS_RetryMessage(MDSRank *mds, const Message::const_ref &m)
-    : MDSInternalContext(mds), m(m) {}
+    : MDSInternalContext(mds), msg(m), op_seq(mds->get_current_op_seq()) {}
   void finish(int r) override {
-    mds->retry_dispatch(m);
+    mds->queue_message_front(std::move(msg), op_seq);
   }
 };
 
@@ -654,8 +683,11 @@ public:
   void dump_sessions(const SessionFilter &filter, Formatter *f) const;
   void evict_clients(const SessionFilter &filter, const MCommand::const_ref &m);
 
-  // Call into me from MDS::ms_dispatch
-  bool ms_dispatch(const Message::const_ref &m);
+  bool ms_can_fast_dispatch(const Message::const_ref &m) const;
+  // Call into me from MDS::ms_fast_dispatch
+  void ms_fast_dispatch(const Message::ref &m) {
+    queue_message(m);
+  }
 
   MDSRankDispatcher(
       mds_rank_t whoami_,
