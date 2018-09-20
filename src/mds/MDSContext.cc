@@ -24,6 +24,11 @@
 void MDSInternalContextBase::complete(int r) {
   MDSRank *mds = get_mds();
 
+  if (async) {
+    mds->queue_context(this, r);
+    return;
+  }
+
   dout(10) << "MDSInternalContextBase::complete: " << typeid(*this).name() << dendl;
   ceph_assert(mds != NULL);
   ceph_assert(mds->mds_lock.is_locked_by_me());

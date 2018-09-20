@@ -48,15 +48,22 @@ protected:
 class MDSInternalContextBase : public MDSContext
 {
 public:
-    template<template<typename> class A>
-    using vec_alloc = std::vector<MDSInternalContextBase *, A<MDSInternalContextBase *>>;
-    using vec = vec_alloc<std::allocator>;
+  template<template<typename> class A>
+  using vec_alloc = std::vector<MDSInternalContextBase *, A<MDSInternalContextBase *>>;
+  using vec = vec_alloc<std::allocator>;
 
-    template<template<typename> class A>
-    using que_alloc = std::deque<MDSInternalContextBase *, A<MDSInternalContextBase *>>;
-    using que = que_alloc<std::allocator>;
-
-    void complete(int r) override;
+  template<template<typename> class A>
+  using que_alloc = std::deque<MDSInternalContextBase *, A<MDSInternalContextBase *>>;
+  using que = que_alloc<std::allocator>;
+  void complete(int r) override;
+  void complete_sync(int r) {
+    async = false;
+    complete(r);
+  }
+  virtual uint64_t get_op_seq() const { return 0; }
+protected:
+  // re-queue myself to mds->op_shardedwq if true
+  bool async = true;
 };
 
 /**
@@ -170,7 +177,7 @@ public:
  */
 class C_MDSInternalNoop final : public MDSInternalContextBase
 {
-  MDSRank* get_mds() override {ceph_abort();}
+  MDSRank* get_mds() override { ceph_abort(); }
 public:
   void finish(int r) override {}
   void complete(int r) override { delete this; }

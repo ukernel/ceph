@@ -1229,7 +1229,7 @@ void Migrator::adjust_export_after_rename(CInode* diri, CDir *olddir)
 
   if (g_conf()->mds_thrash_exports) {
     if (rand() % 3 == 0) {
-      mds->queue_waiter_front(new C_MDC_RestartExportDir(this, freezing_dir, stat.tid));
+      mds->queue_context(new C_MDC_RestartExportDir(this, freezing_dir, stat.tid));
       return;
     }
   }
@@ -1238,7 +1238,7 @@ void Migrator::adjust_export_after_rename(CInode* diri, CDir *olddir)
   diri->get_nested_dirfrags(ls);
   for (auto d : ls) {
     if (!adjust_export_size(stat, d)) {
-      mds->queue_waiter_front(new C_MDC_RestartExportDir(this, freezing_dir, stat.tid));
+      mds->queue_context(new C_MDC_RestartExportDir(this, freezing_dir, stat.tid));
       return;
     }
   }
@@ -2274,7 +2274,7 @@ void Migrator::export_finish(CDir *dir)
   }
 
   if (!finished.empty())
-    mds->queue_waiters(finished);
+    finish_contexts(g_ceph_context, finished);
 
   MutationRef mut = std::move(it->second.mut);
   auto parent = std::move(it->second.parent);
@@ -2600,8 +2600,7 @@ void Migrator::handle_export_prep(const MExportDirPrep::const_ref &m, bool did_a
   C_MDS_ExportPrepFactory cf(this, m);
 
   if (!finished.empty())
-    mds->queue_waiters(finished);
-
+    finish_contexts(g_ceph_context, finished);
 
   bool success = true;
   if (mds->is_active()) {
@@ -2833,8 +2832,7 @@ public:
   MDSInternalContextBase::vec contexts;
   C_MDC_QueueContexts(Migrator *m) : MigratorContext(m) {}
   void finish(int r) override {
-    // execute contexts immediately after 'this' context
-    get_mds()->queue_waiters_front(contexts);
+    finish_contexts(g_ceph_context, contexts);
   }
 };
 

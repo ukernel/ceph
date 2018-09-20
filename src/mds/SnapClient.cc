@@ -107,7 +107,7 @@ void SnapClient::handle_query_result(const MMDSTableRequest::const_ref &m)
       waiting_for_version.erase(it);
     }
     if (!finished.empty())
-      mds->queue_waiters(finished);
+      finish_contexts(g_ceph_context, finished);
   }
 }
 

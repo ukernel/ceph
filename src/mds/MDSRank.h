@@ -244,21 +244,8 @@ class MDSRank {
     // because its init/shutdown happens at the top level.
     PurgeQueue   purge_queue;
 
-    class ProgressThread : public Thread {
-      MDSRank *mds;
-      Cond cond;
-      public:
-      explicit ProgressThread(MDSRank *mds_) : mds(mds_) {}
-      void * entry() override;
-      void shutdown();
-      void signal() {cond.Signal();}
-    } progress_thread;
-
-    list<Message::const_ref> waiting_for_nolaggy;
-    MDSInternalContextBase::que finished_queue;
     // Dispatch, retry, queues
     bool handle_deferrable_message(const Message::const_ref &m);
-    void _advance_queues();
     bool _dispatch(const Message::const_ref &m);
 
     ceph::heartbeat_handle_d *hb;  // Heartbeat for threads using mds_lock
@@ -298,27 +285,6 @@ class MDSRank {
 
     void create_logger();
   public:
-
-    void queue_waiter(MDSInternalContextBase *c) {
-      finished_queue.push_back(c);
-      progress_thread.signal();
-    }
-    void queue_waiter_front(MDSInternalContextBase *c) {
-      finished_queue.push_back(c);
-      progress_thread.signal();
-    }
-    void queue_waiters(MDSInternalContextBase::vec& ls) {
-      MDSInternalContextBase::vec v;
-      v.swap(ls);
-      std::copy(v.begin(), v.end(), std::back_inserter(finished_queue));
-      progress_thread.signal();
-    }
-    void queue_waiters_front(MDSInternalContextBase::vec& ls) {
-      MDSInternalContextBase::vec v;
-      v.swap(ls);
-      std::copy(v.rbegin(), v.rend(), std::front_inserter(finished_queue));
-      progress_thread.signal();
-    }
 
     MDSRank(
         mds_rank_t whoami_,
@@ -568,6 +534,8 @@ class MDSRank {
 
       MDSShard(int id, CephContext *c, MDSRank* m) :
 	shard_id(id), cct(c), mds(m) {}
+      MDSShard(MDSRank::MDSShard&&) :
+	shard_id(0) { ceph_assert(0); }
     };
     std::vector<MDSShard> shards;
     static thread_local MDSShard *tls_shard;
@@ -585,6 +553,7 @@ class MDSRank {
       bool is_shard_empty(uint32_t thread_index) override;
       void _enqueue(OpQueueable&& op) override;
       void _enqueue_front(OpQueueable&& op) override;
+      void signal();
     protected:
       MDSRank *mds;
     } op_shardedwq;
@@ -611,6 +580,35 @@ class MDSRank {
       }
     };
 
+    class OpQueueableRequest : public OpQueueableType<OpQueueableRequest> {
+      MDRequestRef mdr;
+    public:
+      OpQueueableRequest(const MDRequestRef& r) : mdr(r) {}
+      OpQueueableRequest(MDRequestRef&& r) : mdr(std::move(r)) {}
+      OpQueueableRequest(OpQueueableRequest&&) = default;
+      uint32_t get_queue_token() const override {
+	return 0;
+      }
+      void run(MDSRank *mds) override;
+    };
+
+    class OpInternalContext : public OpQueueableType<OpInternalContext> {
+      std::unique_ptr<MDSInternalContextBase> ctx;
+      int ret;
+    public:
+      OpInternalContext(MDSInternalContextBase* c, int r) :
+	ctx(c), ret(r) {}
+      OpInternalContext(OpInternalContext&&) = default;
+      uint64_t get_seq() const override { return ctx->get_op_seq(); }
+      uint32_t get_queue_token() const override {
+	return 0;
+      }
+      void run(MDSRank *mds) override {
+	Mutex::Locker l(mds->mds_lock);
+	ctx.release()->complete_sync(ret);
+      }
+    };
+
 public:
     uint64_t get_current_op_seq() const {
       return tls_shard ? tls_shard->op_current_seq : 0;
@@ -620,6 +618,15 @@ public:
     }
     void queue_message_front(Message::const_ref&& m, uint64_t seq) {
       op_shardedwq.queue_front(OpQueueableMessage(std::move(m), seq));
+    }
+    void queue_request(MDRequestRef&& r) {
+      op_shardedwq.queue_front(OpQueueableRequest(std::move(r)));
+    }
+    void queue_request(const MDRequestRef& r) {
+      op_shardedwq.queue_front(OpQueueableRequest(r));
+    }
+    void queue_context(MDSInternalContextBase *c, int r=0) {
+      op_shardedwq.queue_front(OpInternalContext(c, r));
     }
 
 private:
@@ -635,7 +642,9 @@ protected:
   uint64_t op_seq;
 public:
   C_MDS_RetryMessage(MDSRank *mds, const Message::const_ref &m)
-    : MDSInternalContext(mds), msg(m), op_seq(mds->get_current_op_seq()) {}
+    : MDSInternalContext(mds), msg(m), op_seq(mds->get_current_op_seq()) {
+    async = false;
+  }
   void finish(int r) override {
     mds->queue_message_front(std::move(msg), op_seq);
   }

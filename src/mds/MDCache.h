@@ -1261,10 +1261,12 @@ public:
 };
 
 class C_MDS_RetryRequest : public MDSInternalContext {
-  MDCache *cache;
   MDRequestRef mdr;
- public:
-  C_MDS_RetryRequest(MDCache *c, MDRequestRef& r);
+public:
+  C_MDS_RetryRequest(MDCache *c, MDRequestRef& r)
+    : MDSInternalContext(c->mds), mdr(r) {
+    async = false;
+  }
   void finish(int r) override;
 };
 

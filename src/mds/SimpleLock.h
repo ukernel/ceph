@@ -165,8 +165,8 @@ protected:
   MDSCacheObject *parent;
 
   // lock state
-  __s16 state;
-  __s16 state_flags;
+  __s16 state = LOCK_SYNC;
+  __s16 state_flags = 0;
 
   enum {
     LEASED		= 1 << 0,
@@ -174,7 +174,8 @@ protected:
   };
 
 private:
-  int num_rdlock;
+  int stable_pins = 0;
+  int num_rdlock = 0;
 
   // XXX not in mempool
   struct unstable_bits_t {
@@ -225,12 +226,7 @@ public:
   }
 
   SimpleLock(MDSCacheObject *o, LockType *lt) :
-    type(lt),
-    parent(o), 
-    state(LOCK_SYNC),
-    state_flags(0),
-    num_rdlock(0)
-  {}
+    type(lt), parent(o) {}
   virtual ~SimpleLock() {}
 
   virtual bool is_scatterlock() const {
@@ -314,8 +310,10 @@ public:
   bool is_waiter_for(uint64_t mask) const {
     return parent->is_waiter_for(mask << get_wait_shift());
   }
-  
-  
+
+  bool is_stable_pinned() const { return stable_pins; }
+  void pin_stable_state() { ++stable_pins; }
+  void unpin_stable_state() { --stable_pins; }
 
   // state
   int get_state() const { return state; }

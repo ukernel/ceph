@@ -2496,9 +2496,9 @@ void CInode::unfreeze_inode(MDSInternalContextBase::vec& finished)
 
 void CInode::unfreeze_inode()
 {
-    MDSInternalContextBase::vec finished;
-    unfreeze_inode(finished);
-    mdcache->mds->queue_waiters(finished);
+  MDSInternalContextBase::vec finished;
+  unfreeze_inode(finished);
+  finish_contexts(g_ceph_context, finished);
 }
 
 void CInode::freeze_auth_pin()
@@ -2512,9 +2512,7 @@ void CInode::unfreeze_auth_pin()
   ceph_assert(state_test(CInode::STATE_FROZENAUTHPIN));
   state_clear(CInode::STATE_FROZENAUTHPIN);
   if (!state_test(STATE_FREEZING|STATE_FROZEN)) {
-    MDSInternalContextBase::vec finished;
-    take_waiting(WAIT_UNFREEZE, finished);
-    mdcache->mds->queue_waiters(finished);
+    finish_waiting(WAIT_UNFREEZE);
   }
 }
 
@@ -2529,7 +2527,7 @@ void CInode::clear_ambiguous_auth()
 {
   MDSInternalContextBase::vec finished;
   clear_ambiguous_auth(finished);
-  mdcache->mds->queue_waiters(finished);
+  finish_contexts(g_ceph_context, finished);
 }
 
 // auth_pins
@@ -3070,9 +3068,7 @@ void CInode::remove_client_cap(client_t client)
   bool fcntl_removed = fcntl_locks ? fcntl_locks->remove_all_from(client) : false;
   bool flock_removed = flock_locks ? flock_locks->remove_all_from(client) : false; 
   if (fcntl_removed || flock_removed) {
-    MDSInternalContextBase::vec waiters;
-    take_waiting(CInode::WAIT_FLOCK, waiters);
-    mdcache->mds->queue_waiters(waiters);
+    finish_waiting(CInode::WAIT_FLOCK);
   }
 }
 

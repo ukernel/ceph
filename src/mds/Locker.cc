@@ -725,6 +725,8 @@ void Locker::cancel_locking(MutationImpl *mut, set<CInode*> *pneed_issue)
 	       lock->get_num_xlocks() == 0) {
       lock->set_state(LOCK_XLOCKDONE);
       eval_gather(lock, true, &need_issue);
+    } else if (lock->is_stable() && !lock->is_stable_pinned()) {
+      try_eval(lock, &need_issue);
     }
     if (need_issue)
       pneed_issue->insert(static_cast<CInode *>(lock->get_parent()));
@@ -1218,6 +1220,9 @@ void Locker::eval_scatter_gathers(CInode *in)
 
 void Locker::eval(SimpleLock *lock, bool *need_issue)
 {
+  if (lock->is_stable_pinned())
+    return;
+
   switch (lock->get_type()) {
   case CEPH_LOCK_IFILE:
     return file_eval(static_cast<ScatterLock*>(lock), need_issue);
@@ -1325,6 +1330,7 @@ bool Locker::rdlock_start(SimpleLock *lock, MDRequestRef& mut, bool as_anon)
     if (lock->can_rdlock(client)) {
       lock->get_rdlock();
       mut->locks.emplace_hint(mut->locks.end(), lock, MutationImpl::LockOp::RDLOCK);
+      mut->finish_locking(lock);
       return true;
     }
 
@@ -1357,6 +1363,7 @@ bool Locker::rdlock_start(SimpleLock *lock, MDRequestRef& mut, bool as_anon)
   else
     wait_on = SimpleLock::WAIT_STABLE;  // REQRDLOCK is ignored if lock is unstable, so we need to retry.
   dout(7) << "rdlock_start waiting on " << *lock << " on " << *lock->get_parent() << dendl;
+  mut->start_locking(lock);
   lock->add_waiter(wait_on, new C_MDS_RetryRequest(mdcache, mut));
   nudge_log(lock);
   return false;
@@ -1450,6 +1457,7 @@ bool Locker::wrlock_start(SimpleLock *lock, MDRequestRef& mut, bool nowait)
       lock->get_wrlock();
       auto it = mut->locks.emplace_hint(mut->locks.end(), lock, MutationImpl::LockOp::WRLOCK);
       it->flags |= MutationImpl::LockOp::WRLOCK; // may already remote_wrlocked
+      mut->finish_locking(lock);
       return true;
     }
 
@@ -1492,6 +1500,7 @@ bool Locker::wrlock_start(SimpleLock *lock, MDRequestRef& mut, bool nowait)
 
   if (!nowait) {
     dout(7) << "wrlock_start waiting on " << *lock << " on " << *lock->get_parent() << dendl;
+    mut->start_locking(lock);
     lock->add_waiter(SimpleLock::WAIT_STABLE, new C_MDS_RetryRequest(mdcache, mut));
     nudge_log(lock);
   }
@@ -1612,13 +1621,13 @@ bool Locker::xlock_start(SimpleLock *lock, MDRequestRef& mut)
 	break;
 
       if (lock->get_state() == LOCK_LOCK || lock->get_state() == LOCK_XLOCKDONE) {
-	mut->start_locking(lock);
 	simple_xlock(lock);
       } else {
 	simple_lock(lock);
       }
     }
     
+    mut->start_locking(lock);
     lock->add_waiter(SimpleLock::WAIT_WR|SimpleLock::WAIT_STABLE, new C_MDS_RetryRequest(mdcache, mut));
     nudge_log(lock);
     return false;
@@ -2254,10 +2263,12 @@ public:
     new_max_size(_new_max_size), newsize(_newsize), mtime(_mtime)
   {
     in->get(CInode::PIN_PTRWAITER);
+    in->filelock.pin_stable_state();
   }
   void finish(int r) override {
     if (in->is_auth())
       locker->check_inode_max_size(in, false, new_max_size, newsize, mtime);
+    in->filelock.unpin_stable_state();
     in->put(CInode::PIN_PTRWAITER);
   }
 };
@@ -2917,11 +2928,15 @@ void Locker::handle_client_caps(const MClientCaps::const_ref &m)
 
 
 class C_Locker_RetryRequestCapRelease : public LockerContext {
+  uint64_t op_seq;
   client_t client;
   ceph_mds_request_release item;
 public:
   C_Locker_RetryRequestCapRelease(Locker *l, client_t c, const ceph_mds_request_release& it) :
-    LockerContext(l), client(c), item(it) { }
+    LockerContext(l), op_seq(get_mds()->get_current_op_seq()), client(c), item(it) {}
+  uint64_t get_op_seq() const override {
+    return op_seq;
+  }
   void finish(int r) override {
     string dname;
     MDRequestRef null_ref;
@@ -3454,15 +3469,18 @@ void Locker::handle_client_cap_release(const MClientCapRelease::const_ref &m)
 }
 
 class C_Locker_RetryCapRelease : public LockerContext {
+  uint64_t op_seq;
   client_t client;
   inodeno_t ino;
   uint64_t cap_id;
   ceph_seq_t migrate_seq;
   ceph_seq_t issue_seq;
 public:
-  C_Locker_RetryCapRelease(Locker *l, client_t c, inodeno_t i, uint64_t id,
-			   ceph_seq_t mseq, ceph_seq_t seq) :
-    LockerContext(l), client(c), ino(i), cap_id(id), migrate_seq(mseq), issue_seq(seq) {}
+  C_Locker_RetryCapRelease(Locker *l, client_t c, inodeno_t i,
+			   uint64_t id, ceph_seq_t mseq, ceph_seq_t seq) :
+    LockerContext(l), op_seq(get_mds()->get_current_op_seq()),
+    client(c), ino(i), cap_id(id), migrate_seq(mseq), issue_seq(seq) {}
+  uint64_t get_op_seq() const { return op_seq; }
   void finish(int r) override {
     locker->_do_cap_release(client, ino, cap_id, migrate_seq, issue_seq);
   }
@@ -3494,7 +3512,7 @@ void Locker::_do_cap_release(client_t client, inodeno_t ino, uint64_t cap_id,
   if (should_defer_client_cap_frozen(in)) {
     dout(7) << " freezing|frozen, deferring" << dendl;
     in->add_waiter(CInode::WAIT_UNFREEZE,
-                  new C_Locker_RetryCapRelease(this, client, ino, cap_id, mseq, seq));
+		   new C_Locker_RetryCapRelease(this, client, ino, cap_id, mseq, seq));
     return;
   }
   if (seq != cap->get_last_issue()) {
@@ -4922,6 +4940,7 @@ void Locker::scatter_mix(ScatterLock *lock, bool *need_issue)
 
     // change lock
     lock->set_state(LOCK_MIX);
+    lock->finish_waiters(SimpleLock::WAIT_WR|SimpleLock::WAIT_STABLE);
     lock->clear_scatter_wanted();
     if (lock->get_cap_shift()) {
       if (need_issue)
@@ -4976,6 +4995,7 @@ void Locker::scatter_mix(ScatterLock *lock, bool *need_issue)
     } else {
       in->start_scatter(lock);
       lock->set_state(LOCK_MIX);
+      lock->finish_waiters(SimpleLock::WAIT_WR|SimpleLock::WAIT_STABLE);
       lock->clear_scatter_wanted();
       if (in->is_replicated()) {
 	bufferlist softdata;
@@ -5050,6 +5070,7 @@ void Locker::file_excl(ScatterLock *lock, bool *need_issue)
       mds->mdcache->do_file_recover();
   } else {
     lock->set_state(LOCK_EXCL);
+    lock->finish_waiters(SimpleLock::WAIT_STABLE|SimpleLock::WAIT_WR|SimpleLock::WAIT_RD);
     if (need_issue)
       *need_issue = true;
     else
