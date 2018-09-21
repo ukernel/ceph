@@ -506,8 +506,7 @@ void PurgeQueue::_execute_item(
   }
   ceph_assert(gather.has_subs());
 
-  gather.set_finisher(new C_OnFinisher(
-                      new FunctionContext([this, expire_to](int r){
+  gather.set_finisher(new FunctionContext([this, expire_to](int r){
     Mutex::Locker l(lock);
     _execute_item_complete(expire_to);
 
@@ -523,7 +522,7 @@ void PurgeQueue::_execute_item(
             journaler.trim();
             }));
     }
-  }), &finisher));
+  }));
 
   gather.activate();
 }

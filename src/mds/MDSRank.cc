@@ -2842,17 +2842,18 @@ bool MDSRank::evict_client(int64_t session_id,
 
     Context *on_blacklist_done = new FunctionContext([this, fn](int r) {
       objecter->wait_for_latest_osdmap(
-       new C_OnFinisher(
+       new MDSIOContextWrapper(this,
          new FunctionContext([this, fn](int r) {
-              Mutex::Locker l(mds_lock);
-              auto epoch = objecter->with_osdmap([](const OSDMap &o){
-                  return o.get_epoch();
-              });
+	      ceph_assert(mds_lock.is_locked_by_me());
+	      auto epoch = objecter->with_osdmap([](const OSDMap &o){
+		return o.get_epoch();
+	      });
 
-              set_osd_epoch_barrier(epoch);
-
-              fn();
-            }), finisher)
+	      set_osd_epoch_barrier(epoch);
+	      fn();
+            }
+	  )
+	 )
        );
     });
 

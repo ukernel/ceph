@@ -609,6 +609,21 @@ class MDSRank {
       }
     };
 
+    class OpIOContext : public OpQueueableType<OpIOContext> {
+      std::unique_ptr<MDSIOContextBase> ctx;
+      int ret;
+    public:
+      OpIOContext(MDSIOContextBase* c, int r) :
+	ctx(c), ret(r) {}
+      OpIOContext(OpIOContext&&) = default;
+      uint32_t get_queue_token() const override {
+	return 0;
+      }
+      void run(MDSRank *mds) override {
+	ctx.release()->complete_sync(ret);
+      }
+    };
+
 public:
     uint64_t get_current_op_seq() const {
       return tls_shard ? tls_shard->op_current_seq : 0;
@@ -627,6 +642,9 @@ public:
     }
     void queue_context(MDSInternalContextBase *c, int r=0) {
       op_shardedwq.queue_front(OpInternalContext(c, r));
+    }
+    void queue_io_context(MDSIOContextBase *c, int r=0) {
+      op_shardedwq.queue_front(OpIOContext(c, r));
     }
 
 private:

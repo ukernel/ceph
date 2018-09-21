@@ -105,12 +105,19 @@ public:
   MDSIOContextBase& operator=(const MDSIOContextBase&) = delete;
 
   void complete(int r) override;
+  void complete_sync(int r) {
+    async = false;
+    complete(r);
+  }
 
   virtual void print(ostream& out) const = 0;
 
   static bool check_ios_in_flight(ceph::coarse_mono_time cutoff,
 				  std::string& slow_count,
 				  ceph::coarse_mono_time& oldest);
+protected:
+  // re-queue myself to mds->op_shardedwq if true
+  bool async = true;
 private:
   ceph::coarse_mono_time created_at;
   elist<MDSIOContextBase*>::item list_item;
@@ -191,23 +198,17 @@ public:
 class C_IO_Wrapper : public MDSIOContext
 {
 protected:
-  bool async;
   MDSInternalContextBase *wrapped;
   void finish(int r) override {
-    wrapped->complete(r);
-    wrapped = nullptr;
+    ceph_assert(!wrapped);
   }
 public:
   C_IO_Wrapper(MDSRank *mds_, MDSInternalContextBase *wrapped_) :
-    MDSIOContext(mds_), async(true), wrapped(wrapped_) {
-    ceph_assert(wrapped != NULL);
+    MDSIOContext(mds_),wrapped(wrapped_) {
+    ceph_assert(wrapped);
   }
-
   ~C_IO_Wrapper() override {
-    if (wrapped != nullptr) {
-      delete wrapped;
-      wrapped = nullptr;
-    }
+    delete wrapped;
   }
   void complete(int r) final;
   void print(ostream& out) const override {
@@ -222,6 +223,7 @@ public:
 class MDSInternalContextGather : public MDSInternalContextBase
 {
 protected:
+
   MDSRank *get_mds() override;
 };
 

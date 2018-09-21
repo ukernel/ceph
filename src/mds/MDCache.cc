@@ -6396,8 +6396,7 @@ void MDCache::_truncate_inode(CInode *in, LogSegment *ls)
   filer.truncate(in->inode.ino, &in->inode.layout, *snapc,
 		 pi->truncate_size, pi->truncate_from-pi->truncate_size,
 		 pi->truncate_seq, ceph::real_time::min(), 0,
-		 new C_OnFinisher(new C_IO_MDC_TruncateFinish(this, in, ls),
-				  mds->finisher));
+		 new C_IO_MDC_TruncateFinish(this, in, ls));
 }
 
 struct C_MDC_TruncateLogged : public MDCacheLogContext {
@@ -8519,8 +8518,7 @@ void MDCache::_open_ino_backtrace_fetched(inodeno_t ino, bufferlist& bl, int err
       info.pool = backtrace.pool;
       C_IO_MDC_OpenInoBacktraceFetched *fin =
 	new C_IO_MDC_OpenInoBacktraceFetched(this, ino);
-      fetch_backtrace(ino, info.pool, fin->bl,
-		      new C_OnFinisher(fin, mds->finisher));
+      fetch_backtrace(ino, info.pool, fin->bl, fin);
       return;
     }
   } else if (err == -ENOENT) {
@@ -8531,8 +8529,7 @@ void MDCache::_open_ino_backtrace_fetched(inodeno_t ino, bufferlist& bl, int err
       info.pool = meta_pool;
       C_IO_MDC_OpenInoBacktraceFetched *fin =
 	new C_IO_MDC_OpenInoBacktraceFetched(this, ino);
-      fetch_backtrace(ino, info.pool, fin->bl,
-		      new C_OnFinisher(fin, mds->finisher));
+      fetch_backtrace(ino, info.pool, fin->bl, fin);
       return;
     }
     err = 0; // backtrace.ancestors.empty() is checked below
@@ -8764,8 +8761,7 @@ void MDCache::do_open_ino(inodeno_t ino, open_ino_info_t& info, int err)
     info.checked.clear();
     C_IO_MDC_OpenInoBacktraceFetched *fin =
       new C_IO_MDC_OpenInoBacktraceFetched(this, ino);
-    fetch_backtrace(ino, info.pool, fin->bl,
-		    new C_OnFinisher(fin, mds->finisher));
+    fetch_backtrace(ino, info.pool, fin->bl, fin);
   } else {
     ceph_assert(!info.ancestors.empty());
     info.checking = mds->get_nodeid();
@@ -11566,9 +11562,7 @@ void MDCache::_fragment_committed(dirfrag_t basedirfrag, list<CDir*>& resultfrag
   // remove old frags
   C_GatherBuilder gather(
     g_ceph_context,
-    new C_OnFinisher(
-      new C_IO_MDC_FragmentFinish(this, basedirfrag, resultfrags),
-      mds->finisher));
+      new C_IO_MDC_FragmentFinish(this, basedirfrag, resultfrags));
 
   SnapContext nullsnapc;
   object_locator_t oloc(mds->mdsmap->get_metadata_pool());
