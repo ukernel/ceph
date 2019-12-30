@@ -722,6 +722,7 @@ public:
 			      Inode *in, utime_t from, MetaSession *session,
 			      Dentry *old_dentry = NULL);
   void update_dentry_lease(Dentry *dn, LeaseStat *dlease, utime_t from, MetaSession *session);
+  bool is_dentry_lease_valid(Inode *dir, Dentry *dn);
 
   bool use_faked_inos() { return _use_faked_inos; }
   vinodeno_t map_faked_ino(ino_t ino);
