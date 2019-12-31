@@ -86,6 +86,7 @@ public:
   uint64_t lease_gen = 0;
   ceph_seq_t lease_seq = 0;
   int cap_shared_gen = 0;
+  bool primary_link = false;
 
 private:
   xlist<Dentry *>::item inode_xlist_link;
