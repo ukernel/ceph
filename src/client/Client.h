@@ -1306,6 +1306,8 @@ private:
     ASYNC_UNLINK = 1,
     ASYNC_CREATE = 2,
   };
+
+  int debug_stat_cap_mask = -1;
 };
 
 /**
