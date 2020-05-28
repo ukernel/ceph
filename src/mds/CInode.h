@@ -278,6 +278,8 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
     bool last_scrub_dirty = false; /// are our stamps dirty with respect to disk state?
     bool scrub_in_progress = false; /// are we currently scrubbing?
 
+    fragset_t queued_frags;
+
     ScrubHeaderRef header;
   };
 
@@ -392,7 +394,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
 
   std::ostream& print_db_line_prefix(std::ostream& out) override;
 
-  const scrub_info_t *scrub_info() const{
+  const scrub_info_t *scrub_info() const {
     if (!scrub_infop)
       scrub_info_create();
     return scrub_infop.get();
@@ -424,6 +426,11 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   void scrub_finished(MDSContext **c);
 
   void scrub_aborted(MDSContext **c);
+
+  fragset_t& scrub_queued_frags() {
+    ceph_assert(scrub_infop);
+    return scrub_infop->queued_frags;
+  }
 
   void scrub_set_finisher(MDSContext *c) {
     ceph_assert(!scrub_infop->on_finish);
