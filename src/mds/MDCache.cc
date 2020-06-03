@@ -9700,6 +9700,9 @@ void MDCache::dispatch_request(MDRequestRef& mdr)
     case CEPH_MDS_OP_UPGRADE_SNAPREALM:
       upgrade_inode_snaprealm_work(mdr);
       break;
+    case CEPH_MDS_OP_RDLOCK_FRAGSSTATS:
+      rdlock_dirfrags_stats_work(mdr);
+      break;
     default:
       ceph_abort();
     }
@@ -13217,6 +13220,40 @@ void MDCache::upgrade_inode_snaprealm_work(MDRequestRef& mdr)
   }
 
   mds->mdlog->submit_entry(le, new C_MDC_RespondInternalRequest(this, mdr));
+}
+
+void MDCache::rdlock_dirfrags_stats(CInode *diri, MDSInternalContext* fin)
+{
+  MDRequestRef mdr = request_start_internal(CEPH_MDS_OP_RDLOCK_FRAGSSTATS);
+  mdr->pin(diri);
+  mdr->internal_op_private = diri;
+  mdr->internal_op_finish = fin;
+  return rdlock_dirfrags_stats_work(mdr);
+}
+
+void MDCache::rdlock_dirfrags_stats_work(MDRequestRef& mdr)
+{
+  CInode *diri = static_cast<CInode*>(mdr->internal_op_private);
+  dout(10) << __func__ << " " << *diri << dendl;
+  if (!diri->is_auth()) {
+    mds->server->respond_to_request(mdr, -ESTALE);
+    return;
+  }
+  if (!diri->is_dir()) {
+    mds->server->respond_to_request(mdr, -ENOTDIR);
+    return;
+  }
+
+  MutationImpl::LockOpVec lov;
+  lov.add_rdlock(&diri->dirfragtreelock);
+  lov.add_rdlock(&diri->nestlock);
+  lov.add_rdlock(&diri->filelock);
+  if (!mds->locker->acquire_locks(mdr, lov))
+    return;
+  dout(10) << __func__ << " start dirfrags : " << *diri << dendl;
+
+  mds->server->respond_to_request(mdr, 0);
+  return;
 }
 
 void MDCache::flush_dentry(std::string_view path, Context *fin)

@@ -939,6 +939,7 @@ class MDCache {
   void repair_inode_stats(CInode *diri);
   void repair_dirfrag_stats(CDir *dir);
   void upgrade_inode_snaprealm(CInode *in);
+  void rdlock_dirfrags_stats(CInode *diri, MDSInternalContext *fin);
 
   // my leader
   MDSRank *mds;
@@ -1127,6 +1128,7 @@ class MDCache {
   void repair_inode_stats_work(MDRequestRef& mdr);
   void repair_dirfrag_stats_work(MDRequestRef& mdr);
   void upgrade_inode_snaprealm_work(MDRequestRef& mdr);
+  void rdlock_dirfrags_stats_work(MDRequestRef& mdr);
 
   ceph::unordered_map<inodeno_t,CInode*> inode_map;  // map of head inodes by ino
   map<vinodeno_t, CInode*> snap_inode_map;  // map of snap inodes by ino
