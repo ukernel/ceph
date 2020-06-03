@@ -13082,7 +13082,7 @@ void MDCache::repair_dirfrag_stats_work(MDRequestRef& mdr)
 void MDCache::repair_inode_stats(CInode *diri)
 {
   MDRequestRef mdr = request_start_internal(CEPH_MDS_OP_REPAIR_INODESTATS);
-  mdr->pin(diri);
+  mdr->auth_pin(diri); // already auth pinned by CInode::validate_disk_state()
   mdr->internal_op_private = diri;
   mdr->internal_op_finish = new C_MDSInternalNoop;
   repair_inode_stats_work(mdr);
@@ -13182,7 +13182,7 @@ do_rdlocks:
 void MDCache::upgrade_inode_snaprealm(CInode *in)
 {
   MDRequestRef mdr = request_start_internal(CEPH_MDS_OP_UPGRADE_SNAPREALM);
-  mdr->pin(in);
+  mdr->auth_pin(in); // already auth pinned by CInode::validate_disk_state()
   mdr->internal_op_private = in;
   mdr->internal_op_finish = new C_MDSInternalNoop;
   upgrade_inode_snaprealm_work(mdr);
@@ -13225,7 +13225,7 @@ void MDCache::upgrade_inode_snaprealm_work(MDRequestRef& mdr)
 void MDCache::rdlock_dirfrags_stats(CInode *diri, MDSInternalContext* fin)
 {
   MDRequestRef mdr = request_start_internal(CEPH_MDS_OP_RDLOCK_FRAGSSTATS);
-  mdr->pin(diri);
+  mdr->auth_pin(diri); // already auth pinned by CInode::validate_disk_state()
   mdr->internal_op_private = diri;
   mdr->internal_op_finish = fin;
   return rdlock_dirfrags_stats_work(mdr);
