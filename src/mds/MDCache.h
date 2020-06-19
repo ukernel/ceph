@@ -1124,7 +1124,6 @@ class MDCache {
    * long time)
    */
   void enqueue_scrub_work(MDRequestRef& mdr);
-  void recursive_scrub_finish(const ScrubHeaderRef& header);
   void repair_inode_stats_work(MDRequestRef& mdr);
   void repair_dirfrag_stats_work(MDRequestRef& mdr);
   void upgrade_inode_snaprealm_work(MDRequestRef& mdr);
