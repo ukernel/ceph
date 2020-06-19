@@ -5162,6 +5162,7 @@ void CInode::scrub_initialize(ScrubHeaderRef& header)
   scrub_infop->scrub_in_progress = true;
   scrub_infop->queued_frags.clear();
   scrub_infop->header = header;
+  header->inc_num_pending();
   // right now we don't handle remote inodes
 }
 
@@ -5170,6 +5171,7 @@ void CInode::scrub_aborted() {
   ceph_assert(scrub_is_in_progress());
 
   scrub_infop->scrub_in_progress = false;
+  scrub_infop->header->dec_num_pending();
   scrub_maybe_delete_info();
 }
 
@@ -5181,6 +5183,7 @@ void CInode::scrub_finished() {
   scrub_infop->last_scrub_stamp = ceph_clock_now();
   scrub_infop->last_scrub_dirty = true;
   scrub_infop->scrub_in_progress = false;
+  scrub_infop->header->dec_num_pending();
 }
 
 int64_t CInode::get_backtrace_pool() const

@@ -398,8 +398,9 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
     return scrub_infop.get();
   }
 
-  ScrubHeaderRef get_scrub_header() {
-    return scrub_infop ? scrub_infop->header : nullptr;
+  const ScrubHeaderRef& get_scrub_header() {
+    static const ScrubHeaderRef nullref;
+    return scrub_infop ? scrub_infop->header : nullref;
   }
 
   bool scrub_is_in_progress() const {
