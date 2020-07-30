@@ -25,7 +25,6 @@
 #include "MDLog.h"
 #include "MDSRank.h"
 #include "MDSMap.h"
-#include "messages/MInodeFileCaps.h"
 #include "messages/MMDSPeerRequest.h"
 #include "Migrator.h"
 #include "msg/Messenger.h"
@@ -69,7 +68,10 @@ public:
 };
 
 Locker::Locker(MDSRank *m, MDCache *c) :
-  need_snapflush_inodes(member_offset(CInode, item_caps)), mds(m), mdcache(c) {}
+  need_snapflush_inodes(member_offset(CInode, item_caps)), mds(m), mdcache(c)
+{
+  dirty_rstat_states[utime_t(std::numeric_limits<time_t>::max(), 0)];
+}
 
 
 void Locker::dispatch(const cref_t<Message> &m)
@@ -83,6 +85,10 @@ void Locker::dispatch(const cref_t<Message> &m)
     // inter-mds caps
   case MSG_MDS_INODEFILECAPS:
     handle_inode_file_caps(ref_cast<MInodeFileCaps>(m));
+    break;
+    // inter-mds caps
+  case MSG_MDS_RSTATS:
+    handle_mds_rstats(ref_cast<MMDSRstats>(m));
     break;
     // client sync
   case CEPH_MSG_CLIENT_CAPS:
@@ -104,6 +110,8 @@ void Locker::tick()
 {
   scatter_tick();
   caps_tick();
+
+  advance_dirty_rstats();
 }
 
 /*
@@ -2791,6 +2799,8 @@ bool Locker::check_inode_max_size(CInode *in, bool force_wrlock,
 
   MutationRef mut(new MutationImpl());
   mut->ls = mds->mdlog->get_current_segment();
+
+  utime_t now = ceph_clock_now();
     
   auto pi = in->project_inode(mut);
   pi.inode->version = in->pre_dirty();
@@ -2802,14 +2812,17 @@ bool Locker::check_inode_max_size(CInode *in, bool force_wrlock,
 
   if (update_size) {
     dout(10) << "check_inode_max_size size " << pi.inode->size << " -> " << new_size << dendl;
-    pi.inode->size = new_size;
-    pi.inode->rstat.rbytes = new_size;
+    if (pi.inode->size != new_size) {
+      pi.inode->size = new_size;
+      pi.inode->rstat.rbytes = new_size;
+      pi.inode->rstat.update_dirty_from(now);
+    }
     dout(10) << "check_inode_max_size mtime " << pi.inode->mtime << " -> " << new_mtime << dendl;
     pi.inode->mtime = new_mtime;
     if (new_mtime > pi.inode->ctime) {
       pi.inode->ctime = new_mtime;
       if (new_mtime > pi.inode->rstat.rctime)
-	pi.inode->rstat.rctime = new_mtime;
+	pi.inode->rstat.update_rctime(new_mtime, now);
     }
   }
 
@@ -3592,6 +3605,8 @@ void Locker::_update_cap_fields(CInode *in, int dirty, const cref_t<MClientCaps>
   if (dirty == 0)
     return;
 
+  utime_t now = ceph_clock_now();
+
   /* m must be valid if there are dirty caps */
   ceph_assert(m);
   uint64_t features = m->get_connection()->get_features();
@@ -3601,7 +3616,7 @@ void Locker::_update_cap_fields(CInode *in, int dirty, const cref_t<MClientCaps>
 	    << " for " << *in << dendl;
     pi->ctime = m->get_ctime();
     if (m->get_ctime() > pi->rstat.rctime)
-      pi->rstat.rctime = m->get_ctime();
+      pi->rstat.update_rctime(pi->ctime, now);
   }
 
   if ((features & CEPH_FEATURE_FS_CHANGE_ATTR) &&
@@ -3624,7 +3639,7 @@ void Locker::_update_cap_fields(CInode *in, int dirty, const cref_t<MClientCaps>
 	      << " for " << *in << dendl;
       pi->mtime = mtime;
       if (mtime > pi->rstat.rctime)
-	pi->rstat.rctime = mtime;
+	pi->rstat.update_rctime(mtime, now);
     }
     if (in->is_file() &&   // ONLY if regular file
 	size > pi->size) {
@@ -3632,6 +3647,7 @@ void Locker::_update_cap_fields(CInode *in, int dirty, const cref_t<MClientCaps>
 	      << " for " << *in << dendl;
       pi->size = size;
       pi->rstat.rbytes = size;
+      pi->rstat.update_dirty_from(now);
     }
     if (in->is_file() &&
         (dirty & CEPH_CAP_FILE_WR) &&
@@ -4977,6 +4993,206 @@ void Locker::scatter_eval(ScatterLock *lock, bool *need_issue)
   }
 }
 
+Locker::dirty_rstat_state_t::dirty_rstat_state_t() :
+  dirfrags(member_offset(CDir, item_dirty_rstat)) {}
+
+void Locker::mark_dirty_rstat_dirfrag(CDir *dir)
+{
+  auto dirty_from = dir->get_rstat_dirty_from();
+  dout(10) << "mark_dirty_rstat_dirfrag " << *dir << " dirty_from " << dirty_from << dendl;
+  auto it = dirty_rstat_states.lower_bound(dir->get_rstat_dirty_from());
+  ceph_assert(it != dirty_rstat_states.end());
+  it->second.dirfrags.push_back(&dir->item_dirty_rstat);
+}
+
+void Locker::update_rstat_remote_gathered(utime_t dirty_from)
+{
+  dout(7) << __func__ << " e" << mds_rstat_epoch << " " << dirty_from << dendl;
+  auto it = dirty_rstat_states.lower_bound(dirty_from);
+  ceph_assert(it != dirty_rstat_states.end());
+  it->second.epoch_remote_gathered = mds_rstat_epoch;
+}
+
+void Locker::_advance_dirty_rstats(utime_t stamp)
+{
+  auto ret = dirty_rstat_states.emplace(std::piecewise_construct,
+					std::make_tuple(stamp), std::make_tuple());
+  if (!ret.second)
+    return;
+
+  dout(7) << __func__ << " " << stamp << dendl;
+
+  auto it = ret.first;
+  auto next = it;
+  ++next;
+  ceph_assert(next != dirty_rstat_states.end());
+
+  for (auto p = next->second.dirfrags.begin_use_current(); !p.end(); ) {
+    CDir *dir = *p;
+    ++p;
+    if (dir->get_rstat_dirty_from() <= stamp)
+      it->second.dirfrags.push_back(&dir->item_dirty_rstat);
+  }
+  it->second.epoch_remote_gathered = next->second.epoch_remote_gathered;
+}
+
+void Locker::advance_dirty_rstats()
+{
+  if (mds->is_cluster_degraded())
+    return;
+
+  if (mds->get_nodeid() == 0) {
+    auto last = dirty_rstat_states.end();
+    --last;
+
+    set<mds_rank_t> up_mds;
+    mds->get_mds_map()->get_up_mds_set(up_mds);
+
+    if (dirty_rstat_states.size() > 1) {
+      if (mds_rstat_states.size() >= up_mds.size()) {
+	bool fully_acked = true;
+	utime_t flushed_to;
+	for (const auto& state : mds_rstat_states) {
+	  if (state.epoch_acked != mds_rstat_epoch) {
+	    fully_acked = false;
+	    break;
+	  }
+	  if (flushed_to.is_zero() || flushed_to > state.flushed_to)
+	    flushed_to = state.flushed_to;
+	}
+	if (fully_acked) {
+	  // Locker::handle_mds_rstats() does not advance individual mds'
+	  // 'flushed_to' if it has propagated dirty rstats to other mds
+	  // since previous epoch. Let's assume, at time 'A', we got reports
+	  // from all mds for previous epoch. This guarantees that there is
+	  // no inter-mds rstat progagation since time 'A'.
+	  if (mds_rstat_epoch_fully_acked + 1 == mds_rstat_epoch &&
+	      flushed_to > rstat_flushed_to)
+	    finish_flush_dirty_rstats(flushed_to);
+
+	  mds_rstat_epoch_fully_acked = mds_rstat_epoch;
+	}
+      }
+
+      utime_t flushed_to = rstat_flushed_to;
+      for (auto it = dirty_rstat_states.begin(); it != last; ++it) {
+	if (!it->second.empty())
+	  break;
+	flushed_to = it->first;
+      }
+
+      if (mds_rstat_states.size() != up_mds.size())
+	mds_rstat_states.resize(up_mds.size());
+
+      ++mds_rstat_epoch;
+
+      auto& state = mds_rstat_states.at(0);
+      state.flushed_to = flushed_to;
+      state.epoch_acked = mds_rstat_epoch;
+    }
+
+    if (dirty_rstat_states.size() == 1)
+      _advance_dirty_rstats(ceph_clock_now());
+
+    --last;
+    utime_t advance_to = last->first;
+    for (const auto& r : up_mds) {
+      if (r == 0)
+	continue;
+      auto m = make_message<MMDSRstats>(mds_rstat_epoch, rstat_flushed_to, advance_to);
+      mds->send_message_mds(m, r);
+    }
+  }
+
+  flush_dirty_rstats();
+}
+
+void Locker::flush_dirty_rstats()
+{
+  auto last = dirty_rstat_states.end();
+  ceph_assert(last != dirty_rstat_states.begin());
+  --last;
+  for (auto it = dirty_rstat_states.begin(); it != last; ++it) {
+    for (auto p = it->second.dirfrags.begin_use_current(); !p.end(); ++p) {
+      CInode *diri = (*p)->get_inode();
+      ScatterLock *lock = &diri->nestlock;
+      // let scatter_tick() do the job
+      if (!lock->get_updated_item()->is_on_list()) {
+	lock->mark_dirty();
+	updated_scatterlocks.push_front(lock->get_updated_item());
+      }
+    }
+  }
+}
+
+void Locker::finish_flush_dirty_rstats(utime_t flushed_to)
+{
+  dout(7) << __func__ << " e" << mds_rstat_epoch << " "
+	  << rstat_flushed_to << " -> " << flushed_to << dendl;
+
+  auto it = dirty_rstat_states.begin();
+  while (it->first <= flushed_to) {
+    if (!it->second.empty()) {
+      dout(7) << __func__ << " non-empty " << it->first << dendl;
+      return;
+    }
+    dirty_rstat_states.erase(it++);
+  }
+  rstat_flushed_to = flushed_to;
+}
+
+void Locker::handle_mds_rstats(const cref_t<MMDSRstats> &m)
+{
+  mds_rank_t from = mds_rank_t(m->get_source().num());
+  dout(7) << __func__ << " e" << m->get_epoch()
+	  << " flushed_to=" <<  m->get_flushed_to()
+	  << " advance_to=" << m->get_advance_to()
+	  << " from mds." << from << dendl;
+
+  if (from == 0) {
+    if (mds_rstat_epoch != m->get_epoch() - 1) {
+      mds_rstat_epoch = m->get_epoch() - 1;
+      for (auto& p : dirty_rstat_states) {
+	if (p.second.epoch_remote_gathered)
+	  p.second.epoch_remote_gathered = mds_rstat_epoch;
+      }
+    }
+
+    if (!m->get_advance_to().is_zero())
+      _advance_dirty_rstats(m->get_advance_to());
+
+    utime_t flushed_to = rstat_flushed_to;
+
+    ceph_assert(!dirty_rstat_states.empty());
+    auto last = dirty_rstat_states.end();
+    --last;
+    for (auto it = dirty_rstat_states.begin(); it != last; ++it) {
+      if (!it->second.empty() ||
+	  // Don't advance my 'flushed_to' if any dirty rstat was propagated
+	  // to other mds since previous epoch. Because the other mds might
+	  // get the dirty rstat after it reports its rstat status. Also see
+	  // comments in Locker::advance_dirty_rstats()
+	  it->second.epoch_remote_gathered >= mds_rstat_epoch)
+	break;
+      flushed_to = it->first;
+    }
+
+    mds_rstat_epoch = m->get_epoch();
+
+    if (m->get_flushed_to() > rstat_flushed_to)
+      finish_flush_dirty_rstats(m->get_flushed_to());
+
+    auto ack = make_message<MMDSRstats>(mds_rstat_epoch, flushed_to, utime_t());
+    mds->send_message_mds(ack, 0);
+  } else {
+    if (mds_rstat_epoch == m->get_epoch() &&
+	(size_t)from < mds_rstat_states.size()) {
+      auto& state = mds_rstat_states[from];
+      state.flushed_to = m->get_flushed_to();
+      state.epoch_acked = m->get_epoch();
+    }
+  }
+}
 
 /*
  * mark a scatterlock to indicate that the dir fnode has some dirty data
@@ -5140,7 +5356,6 @@ void Locker::scatter_tick()
     updated_scatterlocks.pop_front();
     scatter_nudge(lock, 0);
   }
-  mds->mdlog->flush();
 }
 
 

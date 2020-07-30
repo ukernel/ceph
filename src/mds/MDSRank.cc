@@ -723,9 +723,6 @@ void MDSRankDispatcher::tick()
   // messages to progress.
   progress_thread.signal();
 
-  // make sure mds log flushes, trims periodically
-  mdlog->flush();
-
   // update average session uptime
   sessionmap.update_average_session_age();
 
@@ -739,6 +736,9 @@ void MDSRankDispatcher::tick()
     server->evict_cap_revoke_non_responders();
     locker->tick();
   }
+
+  // make sure mds log flushes, trims periodically
+  mdlog->flush();
 
   // log
   if (logger) {
@@ -1171,6 +1171,7 @@ bool MDSRank::is_valid_message(const cref_t<Message> &m) {
       type == MSG_MDS_TABLE_REQUEST ||
       type == MSG_MDS_LOCK ||
       type == MSG_MDS_INODEFILECAPS ||
+      type == MSG_MDS_RSTATS ||
       type == CEPH_MSG_CLIENT_CAPS ||
       type == CEPH_MSG_CLIENT_CAPRELEASE ||
       type == CEPH_MSG_CLIENT_LEASE) {
@@ -1245,6 +1246,7 @@ void MDSRank::handle_message(const cref_t<Message> &m)
 
     case MSG_MDS_LOCK:
     case MSG_MDS_INODEFILECAPS:
+    case MSG_MDS_RSTATS:
       ALLOW_MESSAGES_FROM(CEPH_ENTITY_TYPE_MDS);
       locker->dispatch(m);
       break;
@@ -2766,6 +2768,9 @@ void MDSRankDispatcher::handle_asok_command(
       goto out;
     }
     damage_table.erase(id);
+  } else if (command == "get rstats") {
+    std::lock_guard l(mds_lock);
+    r = command_dump_rstats(f, ss);
   } else {
     r = -ENOSYS;
   }
@@ -3576,6 +3581,32 @@ void MDSRank::command_cache_drop(uint64_t timeout, Formatter *f, Context *on_fin
   C_Drop_Cache *request = new C_Drop_Cache(server, mdcache, mdlog, this,
                                            timeout, f, on_finish);
   request->send();
+}
+
+int MDSRank::command_dump_rstats(Formatter *f, std::ostream &ss)
+{
+  if (get_nodeid() != 0) {
+    ss << "I am not mds.0";
+    return -EINVAL;
+  }
+
+  CInode *root = mdcache->get_root();
+  if (!root) {
+    ss << "root inode is not in cache";
+    return -EINVAL;
+  }
+
+  nest_info_t rstat = root->get_projected_inode()->rstat;
+  f->open_object_section("root rstats");
+  f->dump_unsigned("rbytes", rstat.rbytes);
+  f->dump_unsigned("rfiles", rstat.rfiles);
+  f->dump_unsigned("rsubdirs", rstat.rsubdirs);
+  f->dump_unsigned("rsnaps", rstat.rsnaps);
+  f->dump_stream("rctime") << rstat.rctime;
+  f->dump_stream("flushed_to") << locker->get_rstat_flushed_to();
+  f->dump_stream("mds_time") << ceph_clock_now();
+  f->close_section();
+  return 0;
 }
 
 epoch_t MDSRank::get_osd_epoch() const

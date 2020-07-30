@@ -227,9 +227,19 @@ public:
   }
 
   void resync_accounted_fragstat();
+  void mark_dirty_fragstat(LogSegment *ls);
+
   void resync_accounted_rstat();
   void assimilate_dirty_rstat_inodes(MutationRef& mut);
   void assimilate_dirty_rstat_inodes_finish(EMetaBlob *blob);
+
+  void add_dirty_rstat_inode(CInode *in);
+  void remove_dirty_rstat_inode(CInode *in);
+  void mark_dirty_rstat(LogSegment *ls);
+  void clear_dirty_rstat();
+  utime_t get_rstat_dirty_from() const {
+    return rstat_dirty_from;
+  }
 
   void mark_exporting() {
     state_set(CDir::STATE_EXPORTING);
@@ -637,6 +647,10 @@ public:
 
   // my inodes with dirty rstat data
   elist<CInode*> dirty_rstat_inodes;
+
+  // my inodes + myself
+  utime_t rstat_dirty_from;
+  elist<CDir*>::item item_dirty_rstat;
 
   elist<CDentry*> dirty_dentries;
   elist<CDir*>::item item_dirty, item_new;
