@@ -16,14 +16,17 @@
 #define CEPH_COMMON_STRTOL_H
 
 #include <string>
+#include <string_view>
 extern "C" {
 #include <stdint.h>
 }
 
 bool strict_strtob(const char* str, std::string *err);
 
+long long strict_strtoll(std::string_view str, int base, std::string *err);
 long long strict_strtoll(const char *str, int base, std::string *err);
 
+int strict_strtol(std::string_view str, int base, std::string *err);
 int strict_strtol(const char *str, int base, std::string *err);
 
 double strict_strtod(const char *str, std::string *err);
