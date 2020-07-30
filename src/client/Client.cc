@@ -1049,7 +1049,10 @@ void Client::update_dentry_lease(Dentry *dn, LeaseStat *dlease, utime_t from, Me
     }
   }
   dn->cap_shared_gen = dn->dir->parent_inode->shared_gen;
-  dn->primary_link = (dlease->mask & CEPH_LEASE_PRIMARY_LINK);
+  if (dlease->mask & CEPH_LEASE_PRIMARY_LINK)
+    dn->mark_primary();
+  else
+    dn->clear_primary();
 }
 
 bool Client::is_dentry_lease_valid(Inode *dir, Dentry *dn)
@@ -2989,7 +2992,7 @@ void Client::send_reconnect(MetaSession *session)
 	       << " wants " << ccap_string(cap.wanted)
 	       << dendl;
       filepath path;
-      in->make_long_path(path);
+      in->make_short_path(path);
       ldout(cct, 10) << "    path " << path << dendl;
 
       bufferlist flockbl;

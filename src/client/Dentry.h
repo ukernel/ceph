@@ -64,6 +64,14 @@ public:
     inode.reset();
     dir->num_null_dentries++;
   }
+  void mark_primary() {
+    if (inode && inode->dentries.front() != this)
+      inode->dentries.push_front(&inode_xlist_link);
+    primary_link = true;
+  }
+  void clear_primary() {
+    primary_link = false;
+  }
   void detach(void) {
     ceph_assert(!inode);
     auto p = dir->dentries.find(name);
