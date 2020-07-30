@@ -73,6 +73,9 @@
   or use any other convenient way to restore the schedule after the
   upgrade.
 
+* CephFS: libcephfs now supports async dir operations. When certain conditions are met,
+  dir operations can return before receiving request reply from mds.
+
 
 >=16.0.0
 ---------
